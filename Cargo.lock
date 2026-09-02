@@ -1642,6 +1642,7 @@ dependencies = [
  "clap",
  "drua-core",
  "drua-mcp-gateway",
+ "drua-tool-caching",
  "drua-tracing-utils",
  "drua-tunnel",
  "ed25519-dalek",

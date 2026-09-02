@@ -55,4 +55,11 @@ git_proxy:
     entries: []
   mirror_root: null
   mirror_ttl_seconds: 0
+tool_caching:
+  generic_threshold_bytes: 8192
+  sentinel_min_bytes: 512
+  sentinel_hard_cap_bytes: 16384
+  max_fetch_response_bytes: 16384
+  min_hidden_bytes: 32768
+  per_tool: {}
 

@@ -190,6 +190,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         library: config.library.clone(),
         git_proxy: config.git_proxy.clone(),
         tunnel_runtime,
+        tool_caching: config.tool_caching.clone(),
     };
 
     let app = domain::App::init(&pool, app_config, serde_yaml::to_string(&config)?).await?;

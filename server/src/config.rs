@@ -37,6 +37,10 @@ pub struct Config {
     pub library: LibraryConfig,
     #[serde(default)]
     pub git_proxy: GitProxyAppConfig,
+    /// Tool-output elision thresholds (the walker in `drua-tool-caching`).
+    /// Absent config reproduces the crate's own defaults.
+    #[serde(default)]
+    pub tool_caching: drua_tool_caching::ToolCachingConfig,
     #[serde(skip)]
     pub anthropic_api_key: String,
     #[serde(skip)]

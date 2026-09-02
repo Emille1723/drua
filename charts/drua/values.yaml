@@ -228,6 +228,20 @@ galoyAgents:
       enabled: false
       clientId: ""
       installationId: ""
+    ## Tool-output elision thresholds (the walker in drua-tool-caching).
+    ## Omit entirely to keep the crate's own defaults — see
+    ## research/tool-output-truncation-tuning-handoff-2026-09-02.md for
+    ## the tuning rationale. Example (uncomment to override):
+    # toolCaching:
+    #   genericThresholdBytes: 8192
+    #   minHiddenBytes: 32768
+    #   perTool:
+    #     library_get_files:
+    #       genericThresholdBytes: 65536
+    #     drua_admin_spaces:
+    #       genericThresholdBytes: 65536
+    #     notes:
+    #       genericThresholdBytes: 65536
   ## Optional postgres MCP sidecar exposing drua's own database to admins
   ## via MCP Streamable-HTTP at /mcp. Uses bytebase/dbhub (the same image
   ## lana-bank uses) — read-only posture should be enforced at the database

@@ -285,6 +285,27 @@ data:
       repo_url: {{ . | quote }}
       {{- end }}
     {{- end }}
+    {{- with .Values.galoyAgents.config.toolCaching }}
+    tool_caching:
+      {{- with .genericThresholdBytes }}
+      generic_threshold_bytes: {{ . }}
+      {{- end }}
+      {{- with .minHiddenBytes }}
+      min_hidden_bytes: {{ . }}
+      {{- end }}
+      {{- with .perTool }}
+      per_tool:
+        {{- range $tool, $override := . }}
+        {{ $tool }}:
+          {{- with $override.genericThresholdBytes }}
+          generic_threshold_bytes: {{ . }}
+          {{- end }}
+          {{- with $override.minHiddenBytes }}
+          min_hidden_bytes: {{ . }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
     {{- if .Values.galoyAgents.config.githubApp.enabled }}
     github_app:
       client_id: {{ .Values.galoyAgents.config.githubApp.clientId | quote }}

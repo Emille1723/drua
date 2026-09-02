@@ -141,7 +141,7 @@ impl App {
         let audit = Arc::new(Audit::new(pool));
         let tool_caching = Arc::new(drua_tool_caching::ToolCaching::new(
             pool,
-            drua_tool_caching::ToolCachingConfig::default(),
+            config.tool_caching.clone(),
         ));
         let toolsets = ToolSets::init(
             config.toolsets,

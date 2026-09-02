@@ -38,6 +38,10 @@ pub struct AppConfig {
     pub git_proxy: GitProxyAppConfig,
     #[serde(default)]
     pub tunnel_runtime: TunnelRuntimeConfig,
+    /// Tool-output elision thresholds (the walker in `drua-tool-caching`).
+    /// Absent config reproduces the crate's own defaults.
+    #[serde(default)]
+    pub tool_caching: drua_tool_caching::ToolCachingConfig,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -77,5 +81,46 @@ impl EncryptionConfig {
             }
             None => EncryptionKey::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_config_without_tool_caching_block_yields_crate_defaults() {
+        let config: AppConfig = serde_yaml::from_str("{}").expect("empty config parses");
+        let default_tc = drua_tool_caching::ToolCachingConfig::default();
+        assert_eq!(
+            config.tool_caching.generic_threshold_bytes,
+            default_tc.generic_threshold_bytes
+        );
+        assert_eq!(
+            config.tool_caching.min_hidden_bytes,
+            default_tc.min_hidden_bytes
+        );
+        assert!(config.tool_caching.per_tool.is_empty());
+    }
+
+    #[test]
+    fn app_config_parses_tool_caching_block_with_per_tool_overrides() {
+        let yaml = r#"
+tool_caching:
+  min_hidden_bytes: 4096
+  per_tool:
+    library_get_files:
+      generic_threshold_bytes: 65536
+"#;
+        let config: AppConfig = serde_yaml::from_str(yaml).expect("valid tool_caching block");
+        assert_eq!(config.tool_caching.min_hidden_bytes, 4096);
+        // Untouched fields keep the crate default.
+        assert_eq!(config.tool_caching.generic_threshold_bytes, 8192);
+        let over = config
+            .tool_caching
+            .per_tool
+            .get("library_get_files")
+            .expect("per-tool override present");
+        assert_eq!(over.generic_threshold_bytes, Some(65536));
     }
 }
