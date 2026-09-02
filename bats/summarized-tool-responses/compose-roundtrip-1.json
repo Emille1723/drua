@@ -9,17 +9,22 @@
             "invocation_id": "<uuid>",
             "path": "$.result.arr",
             "query": {
-              "len": 105,
+              "len": 772,
               "mode": "json_array_slice",
               "offset": 395
             }
           },
-          "tool": "tool_output_fetch"
+          "complete": false,
+          "kind": "chunked_json_array_slice",
+          "next_offset": 1167,
+          "note": "This bounded recovery returns the first 772 of 2105 elided items; repeat with a later offset to continue.",
+          "tool": "tool_output_fetch",
+          "total_recovery_len": 2105
         },
         "shown_bytes": 8186,
         "shown_items": 395,
-        "total_bytes": 10391,
-        "total_items": 500
+        "total_bytes": 53891,
+        "total_items": 2500
       },
       {
         "path": "$.result.str",
@@ -28,17 +33,22 @@
             "invocation_id": "<uuid>",
             "path": "$.result.str",
             "query": {
-              "len": 28,
+              "len": 50,
               "mode": "lines",
               "offset": 6
             }
           },
-          "tool": "tool_output_fetch"
+          "complete": false,
+          "kind": "chunked_lines",
+          "next_offset": 56,
+          "note": "This bounded recovery returns the first 50 of 152 elided lines; repeat with a later offset to continue.",
+          "tool": "tool_output_fetch",
+          "total_recovery_len": 152
         },
-        "shown_bytes": 4206,
+        "shown_bytes": 3958,
         "shown_lines": 13,
-        "total_bytes": 13051,
-        "total_lines": 41
+        "total_bytes": 52246,
+        "total_lines": 165
       }
     ]
   },
@@ -52,17 +62,22 @@
             "invocation_id": "<uuid>",
             "path": "$.result.arr",
             "query": {
-              "len": 105,
+              "len": 772,
               "mode": "json_array_slice",
               "offset": 395
             }
           },
-          "tool": "tool_output_fetch"
+          "complete": false,
+          "kind": "chunked_json_array_slice",
+          "next_offset": 1167,
+          "note": "This bounded recovery returns the first 772 of 2105 elided items; repeat with a later offset to continue.",
+          "tool": "tool_output_fetch",
+          "total_recovery_len": 2105
         },
         "shown_bytes": 8186,
         "shown_items": 395,
-        "total_bytes": 10391,
-        "total_items": 500
+        "total_bytes": 53891,
+        "total_items": 2500
       },
       {
         "path": "$.result.str",
@@ -71,17 +86,22 @@
             "invocation_id": "<uuid>",
             "path": "$.result.str",
             "query": {
-              "len": 28,
+              "len": 50,
               "mode": "lines",
               "offset": 6
             }
           },
-          "tool": "tool_output_fetch"
+          "complete": false,
+          "kind": "chunked_lines",
+          "next_offset": 56,
+          "note": "This bounded recovery returns the first 50 of 152 elided lines; repeat with a later offset to continue.",
+          "tool": "tool_output_fetch",
+          "total_recovery_len": 152
         },
-        "shown_bytes": 4206,
+        "shown_bytes": 3958,
         "shown_lines": 13,
-        "total_bytes": 13051,
-        "total_lines": 41
+        "total_bytes": 52246,
+        "total_lines": 165
       }
     ],
     "persisted_root": "persisted tool result root directly; catalog/sub-tool calls use upstream T, compose outer calls use ComposeOutput (JS return at $.result); not the outer {result: ...} MCP wire wrapper",
@@ -91,24 +111,34 @@
           "invocation_id": "<uuid>",
           "path": "$.result.arr",
           "query": {
-            "len": 105,
+            "len": 772,
             "mode": "json_array_slice",
             "offset": 395
           }
         },
-        "tool": "tool_output_fetch"
+        "complete": false,
+        "kind": "chunked_json_array_slice",
+        "next_offset": 1167,
+        "note": "This bounded recovery returns the first 772 of 2105 elided items; repeat with a later offset to continue.",
+        "tool": "tool_output_fetch",
+        "total_recovery_len": 2105
       },
       {
         "args_template": {
           "invocation_id": "<uuid>",
           "path": "$.result.str",
           "query": {
-            "len": 28,
+            "len": 50,
             "mode": "lines",
             "offset": 6
           }
         },
-        "tool": "tool_output_fetch"
+        "complete": false,
+        "kind": "chunked_lines",
+        "next_offset": 56,
+        "note": "This bounded recovery returns the first 50 of 152 elided lines; repeat with a later offset to continue.",
+        "tool": "tool_output_fetch",
+        "total_recovery_len": 152
       }
     ],
     "root_kind": "object",
@@ -118,18 +148,18 @@
         "args_digest": "fake_upstream_str-large-table({})",
         "invocation_id": "<uuid>",
         "kind": "lines",
-        "raw_size_bytes": 13093,
+        "raw_size_bytes": 52412,
         "root_path": "$",
-        "summary_envelope_bytes": 8233,
+        "summary_envelope_bytes": 8390,
         "tool_name": "fake_upstream_str-large-table"
       },
       {
         "args_digest": "fake_upstream_arr-large-passthrough-items({})",
         "invocation_id": "<uuid>",
         "kind": "json_array_slice",
-        "raw_size_bytes": 10391,
+        "raw_size_bytes": 53891,
         "root_path": "$",
-        "summary_envelope_bytes": 8566,
+        "summary_envelope_bytes": 8684,
         "tool_name": "fake_upstream_arr-large-passthrough-items"
       }
     ]
@@ -1725,25 +1755,25 @@
       "count": 3,
       "ok": true
     },
-    "str": "<head lines=\"6\">\nNAMESPACE     APIVERSION   KIND   NAME                                                             READY   STATUS    RESTARTS   AGE    IP             NODE                                                  NOMINATED NODE   READINESS GATES   LABELS\nkube-system   v1           Pod    calico-node-kxw8s                                                1/1     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\nkube-system   v1           Pod    calico-node-qjjtd                                                1/1     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\nkube-system   v1           Pod    calico-node-v5nmp                                                1/1     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\nkube-system   v1           Pod    calico-node-vertical-autoscaler-bbb8bfb74-r76x7                  1/1     Running   0          21h    192.168.1.5    gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            k8s-app=calico-node-autoscaler,pod-template-hash=bbb8bfb74\nkube-system   v1           Pod    calico-typha-5d84858687-2zhk7                                    1/1     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            k8s-app=calico-typha,pod-template-hash=5d84858687\n</head>\n<bulk-elided lines=\"28\">\n28 lines elided\n</bulk-elided>\n<tail lines=\"7\">\nkube-system   v1           Pod    netd-k9w4z                                                       3/3     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\nkube-system   v1           Pod    netd-vgs2g                                                       3/3     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\nkube-system   v1           Pod    netd-xxd4r                                                       3/3     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\nkube-system   v1           Pod    pdcsi-node-5tr4q                                                 2/2     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\nkube-system   v1           Pod    pdcsi-node-7z9zs                                                 2/2     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\nkube-system   v1           Pod    pdcsi-node-lcxtr                                                 2/2     Running   0          21h    10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\nkube-system   v1           Pod    runsc-metric-server-qr24t                                        1/1     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=6b657887d,k8s-app=runsc-metric-server,pod-template-generation=2\n</tail>"
+    "str": "<head lines=\"6\">\ndrua dev shell loaded (engine: docker)\nNAMESPACE     APIVERSION   KIND   NAME                                                             READY   STATUS    RESTARTS   AGE    IP             NODE                                                  NOMINATED NODE   READINESS GATES   LABELS\nkube-system   v1           Pod    calico-node-kxw8s                                                1/1     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\nkube-system   v1           Pod    calico-node-qjjtd                                                1/1     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\nkube-system   v1           Pod    calico-node-v5nmp                                                1/1     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\nkube-system   v1           Pod    calico-node-vertical-autoscaler-bbb8bfb74-r76x7                  1/1     Running   0          21h    192.168.1.5    gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            k8s-app=calico-node-autoscaler,pod-template-hash=bbb8bfb74\n</head>\n<bulk-elided lines=\"152\">\n152 lines elided\n</bulk-elided>\n<tail lines=\"7\">\nkube-system   v1           Pod    netd-k9w4z                                                       3/3     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\nkube-system   v1           Pod    netd-vgs2g                                                       3/3     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\nkube-system   v1           Pod    netd-xxd4r                                                       3/3     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\nkube-system   v1           Pod    pdcsi-node-5tr4q                                                 2/2     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\nkube-system   v1           Pod    pdcsi-node-7z9zs                                                 2/2     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\nkube-system   v1           Pod    pdcsi-node-lcxtr                                                 2/2     Running   0          21h    10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\nkube-system   v1           Pod    runsc-metric-server-qr24t                                        1/1     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=6b657887d,k8s-app=runsc-metric-server,pod-template-generation=2\n</tail>"
   },
   "sub_invocations": [
     {
       "args_digest": "fake_upstream_str-large-table({})",
       "invocation_id": "<uuid>",
       "kind": "lines",
-      "raw_size_bytes": 13093,
+      "raw_size_bytes": 52412,
       "root_path": "$",
-      "summary_envelope_bytes": 8233,
+      "summary_envelope_bytes": 8390,
       "tool_name": "fake_upstream_str-large-table"
     },
     {
       "args_digest": "fake_upstream_arr-large-passthrough-items({})",
       "invocation_id": "<uuid>",
       "kind": "json_array_slice",
-      "raw_size_bytes": 10391,
+      "raw_size_bytes": 53891,
       "root_path": "$",
-      "summary_envelope_bytes": 8566,
+      "summary_envelope_bytes": 8684,
       "tool_name": "fake_upstream_arr-large-passthrough-items"
     }
   ],

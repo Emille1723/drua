@@ -257,9 +257,13 @@ assert_summarized_text_matches() {
 }
 
 @test "fake-upstream: str-large-table summarized into <summary>+<recovery> envelope" {
-  # ~13KB kubectl-table-style output (real k8s_list_pods shape); exceeds the
-  # 8KiB threshold so tool-caching elides head/tail and renders a
-  # range-mode tool_output_fetch recovery template. Snapshot lives at
+  # ~52KB kubectl-table-style output (real k8s_list_pods shape, repeated
+  # rows). Exceeds the 8KiB threshold so tool-caching elides head/tail
+  # and renders a range-mode tool_output_fetch recovery template. Sized
+  # so the elided (hidden) portion clears the min-hidden-bytes floor
+  # (32KB default, tool-output-truncation-tuning handoff Task 1) —
+  # the original ~13KB fixture hid only ~5KB and would now passthrough
+  # entirely, no longer exercising this test. Snapshot lives at
   # bats/summarized-tool-responses/str-large-table.txt — open the file to
   # see exactly what the agent receives. Re-run with UPDATE_FIXTURES=1 to
   # regenerate after intentional envelope changes.
@@ -269,10 +273,13 @@ assert_summarized_text_matches() {
 }
 
 @test "fake-upstream: arr-large-passthrough-items summarized into array sentinel envelope" {
-  # 14KB top-level JSON array of 500 small {id, tag} objects. Items are
+  # ~54KB top-level JSON array of 2500 small {id, tag} objects. Items are
   # sub-threshold so they passthrough verbatim; the root array is over
   # threshold so the walker emits an {_elided, kind: "array", head, tail}
-  # sentinel and a json_array_slice recovery template.
+  # sentinel and a json_array_slice recovery template. Sized so the
+  # elided (hidden) portion clears the min-hidden-bytes floor (32KB
+  # default) — the original 500-item/14KB fixture hid only ~5KB and
+  # would now passthrough entirely, no longer exercising this test.
   assert_summarized_text_matches \
     "fake_upstream_arr-large-passthrough-items" \
     "arr-large-passthrough-items"
@@ -490,14 +497,20 @@ assert_compose_snapshot() {
   assert_compose_snapshot "$r2_struct" "compose-roundtrip-2"
 }
 
-@test "fake-upstream: nix-copy-output → chain compacts copy/build/cache runs" {
+@test "fake-upstream: nix-copy-output → chain compaction discarded under the min-hidden-bytes floor" {
   # Tool output is well under threshold (1.8KB) so the budget-aware
-  # eliders don't fire. But the nix pattern passes still detect copy/
-  # building/cache-activity runs and compact them — exercising the
-  # generic StringSummarizerChain on a small payload.
+  # eliders don't fire. The nix pattern passes still detect the
+  # copy-run and would compact it, but that compaction only hides
+  # ~1.6KB — under the 32KB min-hidden-bytes floor (walker.rs's
+  # `summarize`), so the floor discards it and passes the raw,
+  # uncompacted text through instead. This is the documented trade-off
+  # from the tool-output-truncation-tuning handoff, Task 1: chain
+  # compactions below the floor are sacrificed along with elision:
+  # real per-line savings here are tiny next to what a 100KB-context
+  # round trip would cost to recover them.
   #
-  # Snapshot shows the rendered nix-* markers in place of the original
-  # runs. UPDATE_FIXTURES=1 regens.
+  # Snapshot shows the raw, uncompacted runs (no nix-* markers, no
+  # <summary>/<recovery> envelope). UPDATE_FIXTURES=1 regens.
   assert_summarized_text_matches \
     "fake_upstream_nix-copy-output" \
     "nix-copy-output"

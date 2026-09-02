@@ -1,13 +1,28 @@
-<summary path="$" total-bytes="1821" shown-bytes="197" total-lines="28" shown-lines="6">
 preparing to build
 building '/nix/store/aaa-foo.drv'
-<nix-copy original-lines="3-27" original-bytes="1700">
-25 paths
-</nix-copy>
+copying path '/nix/store/bbb00-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb01-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb02-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb03-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb04-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb05-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb06-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb07-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb08-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb09-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb10-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb11-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb12-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb13-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb14-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb15-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb16-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb17-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb18-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb19-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb20-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb21-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb22-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb23-bar' from 'https://cache.nixos.org/'
+copying path '/nix/store/bbb24-bar' from 'https://cache.nixos.org/'
 error: builder for '/nix/store/aaa-foo.drv' failed with exit code 1
-</summary>
-<recovery>
-  <elided path="$" total-bytes="1821" shown-bytes="197" total-lines="28" shown-lines="6">
-    tool_output_fetch(invocation_id="<uuid>", path="$")
-  </elided>
-</recovery>
