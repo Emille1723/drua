@@ -79,6 +79,23 @@ pub enum FetchQuery {
         #[serde(deserialize_with = "liberal::deserialize_usize")]
         len: usize,
     },
+    /// Locate content inside a persisted payload. Scans string leaves at
+    /// or under `path` and returns matching lines with their json-path
+    /// and line number, so a follow-up `lines` fetch can read the
+    /// surrounding region. When the value at `path` is itself a string,
+    /// only that leaf is scanned; when it's an object or array, every
+    /// string leaf under it is scanned and each match reports its own
+    /// full path (e.g. `$.files[0].body`).
+    Grep {
+        pattern: String,
+        #[serde(default)]
+        ignore_case: bool,
+        /// Lines of context either side of a match.
+        #[serde(default = "default_grep_context")]
+        context: usize,
+        #[serde(default = "default_grep_max_matches")]
+        max_matches: usize,
+    },
     /// Return the persisted curated `<summary>+<recovery>` envelope —
     /// the same view the agent would have seen from a top-level
     /// `call_tool` invocation. Useful for inspecting a compose
@@ -89,6 +106,14 @@ pub enum FetchQuery {
     /// fetch response cap; callers that advertise summary recovery
     /// should expose the envelope size before this fetch is attempted.
     Summary,
+}
+
+fn default_grep_context() -> usize {
+    2
+}
+
+fn default_grep_max_matches() -> usize {
+    50
 }
 
 /// Translate a possibly-negative offset to a clamped `[0, total]` index.
@@ -104,7 +129,7 @@ fn resolve_offset(offset: i64, total: usize) -> usize {
 }
 
 impl FetchQuery {
-    fn apply(&self, value: Value) -> Result<Value, ToolCachingError> {
+    fn apply(&self, value: Value, base_path: &str) -> Result<Value, ToolCachingError> {
         match self {
             FetchQuery::Range { offset, len } => {
                 let s = value.as_str().ok_or_else(|| {
@@ -137,12 +162,94 @@ impl FetchQuery {
                 let end = start.saturating_add(*len).min(arr.len());
                 Ok(Value::Array(arr[start..end].to_vec()))
             }
+            FetchQuery::Grep {
+                pattern,
+                ignore_case,
+                context,
+                max_matches,
+            } => {
+                let re = compile_grep_regex(pattern, *ignore_case)?;
+                let mut leaves = Vec::new();
+                collect_string_leaves(&value, base_path, &mut leaves);
+                let mut remaining = *max_matches;
+                let mut matches = Vec::new();
+                for (leaf_path, text) in &leaves {
+                    if remaining == 0 {
+                        break;
+                    }
+                    grep_leaf(text, leaf_path, &re, *context, &mut remaining, &mut matches);
+                }
+                Ok(Value::Array(matches))
+            }
             // Summary is short-circuited in `StoredInvocation::query` —
             // it doesn't fit the slice-at-resolved-path pattern.
             FetchQuery::Summary => Err(ToolCachingError::InvalidPath(
                 "summary query is handled at the invocation level".into(),
             )),
         }
+    }
+}
+
+fn compile_grep_regex(pattern: &str, ignore_case: bool) -> Result<regex::Regex, ToolCachingError> {
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
+        .map_err(|e| {
+            ToolCachingError::InvalidPath(format!("invalid grep pattern `{pattern}`: {e}"))
+        })
+}
+
+/// Recursively collect `(json_path, text)` for every string leaf at or
+/// under `value`, rooted at `base_path`. Object keys use
+/// [`crate::walker::format_path_key`] so dotted/bracketed keys round-trip
+/// through the same path grammar the walker's own recovery templates use.
+fn collect_string_leaves(value: &Value, path: &str, out: &mut Vec<(String, String)>) {
+    match value {
+        Value::String(s) => out.push((path.to_string(), s.clone())),
+        Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                collect_string_leaves(v, &format!("{path}[{i}]"), out);
+            }
+        }
+        Value::Object(map) => {
+            for (k, v) in map {
+                collect_string_leaves(v, &crate::walker::format_path_key(path, k), out);
+            }
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+}
+
+/// Scan `text` line-by-line for `re`, appending up to `*remaining` match
+/// entries (each with `context` lines of surrounding text) to `out` and
+/// decrementing `*remaining` per match. Stops early once `*remaining`
+/// hits zero so a pathological leaf can't blow past `max_matches`.
+fn grep_leaf(
+    text: &str,
+    path: &str,
+    re: &regex::Regex,
+    context: usize,
+    remaining: &mut usize,
+    out: &mut Vec<Value>,
+) {
+    let lines: Vec<&str> = text.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if *remaining == 0 {
+            return;
+        }
+        if !re.is_match(line) {
+            continue;
+        }
+        let before_start = i.saturating_sub(context);
+        let after_end = (i + 1 + context).min(lines.len());
+        out.push(serde_json::json!({
+            "path": path,
+            "line": i,
+            "text": line,
+            "context_before": lines[before_start..i],
+            "context_after": lines[i + 1..after_end],
+        }));
+        *remaining -= 1;
     }
 }
 
@@ -162,6 +269,7 @@ impl FetchQuery {
         &self,
         resolved: Value,
         max_bytes: usize,
+        base_path: &str,
     ) -> Result<Option<ShrunkSlice>, ToolCachingError> {
         match self {
             FetchQuery::Lines { offset, len } => {
@@ -249,6 +357,50 @@ impl FetchQuery {
                     next_offset: actual_end,
                 }))
             }
+            FetchQuery::Grep {
+                pattern,
+                ignore_case,
+                context,
+                max_matches,
+            } => {
+                let re = compile_grep_regex(pattern, *ignore_case)?;
+                let mut leaves = Vec::new();
+                collect_string_leaves(&resolved, base_path, &mut leaves);
+                let mut remaining = *max_matches;
+                let mut matches = Vec::new();
+                for (leaf_path, text) in &leaves {
+                    if remaining == 0 {
+                        break;
+                    }
+                    grep_leaf(text, leaf_path, &re, *context, &mut remaining, &mut matches);
+                }
+                let total = matches.len();
+                if total == 0 {
+                    return Ok(None);
+                }
+                let mut hi = total;
+                while hi > 0 {
+                    let candidate = Value::Array(matches[..hi].to_vec());
+                    let text = fetch_text_for_raw(&candidate);
+                    if text.len() <= max_bytes {
+                        return Ok(Some(ShrunkSlice {
+                            value: candidate,
+                            original_len: total,
+                            actual_len: hi,
+                            unit: "matches",
+                            next_offset: hi,
+                        }));
+                    }
+                    let ratio = max_bytes as f64 / text.len() as f64;
+                    let new_hi = ((hi as f64) * ratio * 0.9) as usize;
+                    hi = if new_hi >= hi {
+                        hi - 1
+                    } else {
+                        new_hi.max(1).min(hi - 1)
+                    };
+                }
+                Ok(None)
+            }
             FetchQuery::Summary => Ok(None),
         }
     }
@@ -310,7 +462,7 @@ impl StoredInvocation {
         }
         let resolved = self.navigate(path)?.clone();
         let sliced = match query {
-            Some(q) => q.apply(resolved.clone())?,
+            Some(q) => q.apply(resolved.clone(), path)?,
             None => resolved.clone(),
         };
         let text = fetch_text_for_raw(&sliced);
@@ -325,21 +477,35 @@ impl StoredInvocation {
 
         let mut shrink_failed = false;
         if let Some(q) = query {
-            match q.shrink_to_fit(resolved, max_bytes)? {
+            match q.shrink_to_fit(resolved, max_bytes, path)? {
                 Some(shrunk) => {
                     let text = fetch_text_for_raw(&shrunk.value);
                     let wrapped = wrap_at_path(path, shrunk.value)?;
                     let remaining = shrunk.original_len - shrunk.actual_len;
-                    let note = format!(
-                        "\n\n[TRUNCATED: returned {actual} of {requested} {unit} \
-                         ({remaining} remaining). Fetch the next page with \
-                         offset: {next_offset}]",
-                        actual = shrunk.actual_len,
-                        requested = shrunk.original_len,
-                        unit = shrunk.unit,
-                        remaining = remaining,
-                        next_offset = shrunk.next_offset,
-                    );
+                    // `matches` (grep) has no `offset` semantics — the
+                    // agent should narrow the pattern or raise
+                    // `max_matches`, not page through an offset.
+                    let note = if shrunk.unit == "matches" {
+                        format!(
+                            "\n\n[TRUNCATED: returned {actual} of {requested} matches \
+                             ({remaining} remaining). Narrow `pattern`, lower `context`, \
+                             or raise `max_matches` on a follow-up grep to see more]",
+                            actual = shrunk.actual_len,
+                            requested = shrunk.original_len,
+                            remaining = remaining,
+                        )
+                    } else {
+                        format!(
+                            "\n\n[TRUNCATED: returned {actual} of {requested} {unit} \
+                             ({remaining} remaining). Fetch the next page with \
+                             offset: {next_offset}]",
+                            actual = shrunk.actual_len,
+                            requested = shrunk.original_len,
+                            unit = shrunk.unit,
+                            remaining = remaining,
+                            next_offset = shrunk.next_offset,
+                        )
+                    };
                     return Ok(FetchResult {
                         result: CallToolResult::success(vec![Content::text(format!(
                             "{text}{note}"
@@ -920,7 +1086,7 @@ mod tests {
     fn fetch_query_range_slices_string() {
         let q = FetchQuery::Range { offset: 3, len: 4 };
         assert_eq!(
-            q.apply(Value::String("0123456789".into())).unwrap(),
+            q.apply(Value::String("0123456789".into()), "$").unwrap(),
             Value::String("3456".into()),
         );
     }
@@ -929,7 +1095,7 @@ mod tests {
     fn fetch_query_range_negative_offset_counts_from_end() {
         let q = FetchQuery::Range { offset: -4, len: 4 };
         assert_eq!(
-            q.apply(Value::String("0123456789".into())).unwrap(),
+            q.apply(Value::String("0123456789".into()), "$").unwrap(),
             Value::String("6789".into()),
         );
     }
@@ -938,7 +1104,7 @@ mod tests {
     fn fetch_query_range_snaps_to_utf8_boundaries() {
         let q = FetchQuery::Range { offset: 1, len: 3 };
         assert_eq!(
-            q.apply(Value::String("a▲b".into())).unwrap(),
+            q.apply(Value::String("a▲b".into()), "$").unwrap(),
             Value::String("▲".into()),
         );
     }
@@ -947,7 +1113,7 @@ mod tests {
     fn fetch_query_range_inside_one_codepoint_returns_empty_string() {
         let q = FetchQuery::Range { offset: 2, len: 1 };
         assert_eq!(
-            q.apply(Value::String("a▲b".into())).unwrap(),
+            q.apply(Value::String("a▲b".into()), "$").unwrap(),
             Value::String(String::new()),
         );
     }
@@ -956,7 +1122,7 @@ mod tests {
     fn fetch_query_lines_negative_offset_returns_tail() {
         let q = FetchQuery::Lines { offset: -2, len: 2 };
         assert_eq!(
-            q.apply(Value::String("a\nb\nc\nd\ne".into())).unwrap(),
+            q.apply(Value::String("a\nb\nc\nd\ne".into()), "$").unwrap(),
             Value::String("d\ne".into()),
         );
     }
@@ -965,7 +1131,7 @@ mod tests {
     fn fetch_query_array_slice_negative_offset_returns_tail() {
         let q = FetchQuery::JsonArraySlice { offset: -2, len: 5 };
         let arr = serde_json::json!([1, 2, 3, 4, 5]);
-        assert_eq!(q.apply(arr).unwrap(), serde_json::json!([4, 5]));
+        assert_eq!(q.apply(arr, "$").unwrap(), serde_json::json!([4, 5]));
     }
 
     #[test]
@@ -975,7 +1141,7 @@ mod tests {
             len: 3,
         };
         assert_eq!(
-            q.apply(Value::String("a\nb\nc\nd".into())).unwrap(),
+            q.apply(Value::String("a\nb\nc\nd".into()), "$").unwrap(),
             Value::String("a\nb\nc".into()),
         );
     }
@@ -1314,5 +1480,131 @@ mod tests {
         let hint = inv.too_large_hint("$.sub_invocations", 1024, false);
         assert!(!hint.contains("github_list_prs"), "got: {hint}");
         assert!(hint.contains("mode: \"summary\""), "got: {hint}");
+    }
+
+    // ── Task 4: grep fetch mode ──
+
+    #[test]
+    fn grep_returns_line_numbers_for_string_path() {
+        let text = "alpha\nbeta\nboom at line 412\ndelta\nepsilon";
+        let q = FetchQuery::Grep {
+            pattern: "boom".to_string(),
+            ignore_case: false,
+            context: 1,
+            max_matches: 10,
+        };
+        let matches = q.apply(Value::String(text.to_string()), "$").unwrap();
+        let arr = matches.as_array().expect("grep returns an array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["path"], "$");
+        assert_eq!(arr[0]["line"], 2);
+        assert_eq!(arr[0]["text"], "boom at line 412");
+        assert_eq!(arr[0]["context_before"], serde_json::json!(["beta"]));
+        assert_eq!(arr[0]["context_after"], serde_json::json!(["delta"]));
+    }
+
+    #[test]
+    fn grep_walks_string_leaves_of_an_object() {
+        // `apply` mirrors `query()`'s contract: `value` is already
+        // navigated to `base_path`, so this is what's *at* `$.files`,
+        // not the whole root.
+        let files_at_path = serde_json::json!([
+            {"body": "nothing here"},
+            {"body": "needle in file 1"},
+        ]);
+        let q = FetchQuery::Grep {
+            pattern: "needle".to_string(),
+            ignore_case: false,
+            context: 0,
+            max_matches: 10,
+        };
+        let matches = q.apply(files_at_path, "$.files").unwrap();
+        let arr = matches.as_array().expect("grep returns an array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["path"], "$.files[1].body");
+    }
+
+    #[test]
+    fn grep_respects_max_matches_and_shrinks_to_fit() {
+        let lines: Vec<String> = (0..20).map(|i| format!("needle {i}")).collect();
+        let text = lines.join("\n");
+        let q = FetchQuery::Grep {
+            pattern: "needle".to_string(),
+            ignore_case: false,
+            context: 0,
+            max_matches: 3,
+        };
+        let matches = q
+            .apply(Value::String(text.clone()), "$")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(matches, 3, "max_matches caps the result even with 20 hits");
+
+        // shrink_to_fit independently bounds by byte size regardless of
+        // the requested max_matches.
+        let q_unbounded = FetchQuery::Grep {
+            pattern: "needle".to_string(),
+            ignore_case: false,
+            context: 0,
+            max_matches: 1000,
+        };
+        let cap = 150;
+        let shrunk = q_unbounded
+            .shrink_to_fit(Value::String(text), cap, "$")
+            .unwrap()
+            .expect("some matches should fit a 150-byte cap");
+        assert!(shrunk.actual_len < shrunk.original_len);
+        assert_eq!(shrunk.unit, "matches");
+        assert!(fetch_text_for_raw(&shrunk.value).len() <= cap);
+    }
+
+    #[test]
+    fn grep_invalid_pattern_is_invalid_argument() {
+        let q = FetchQuery::Grep {
+            pattern: "(unclosed".to_string(),
+            ignore_case: false,
+            context: 2,
+            max_matches: 50,
+        };
+        let err = q.apply(Value::String("x".into()), "$").unwrap_err();
+        assert!(
+            matches!(err, ToolCachingError::InvalidPath(_)),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn grep_context_lines_clamp_at_boundaries() {
+        let text = "match at start\nb\nc";
+        let q = FetchQuery::Grep {
+            pattern: "^match".to_string(),
+            ignore_case: false,
+            context: 5,
+            max_matches: 10,
+        };
+        let matches = q.apply(Value::String(text.to_string()), "$").unwrap();
+        let arr = matches.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["context_before"], serde_json::json!([]));
+        assert_eq!(arr[0]["context_after"], serde_json::json!(["b", "c"]));
+
+        let text2 = "a\nb\nlast match";
+        let matches2 = q.apply(Value::String(text2.to_string()), "$").unwrap();
+        // Pattern `^match` won't hit "last match" (anchored), so use a
+        // plain substring pattern for the tail-boundary case instead.
+        assert!(matches2.as_array().unwrap().is_empty());
+
+        let q_tail = FetchQuery::Grep {
+            pattern: "last match".to_string(),
+            ignore_case: false,
+            context: 5,
+            max_matches: 10,
+        };
+        let matches3 = q_tail.apply(Value::String(text2.to_string()), "$").unwrap();
+        let arr3 = matches3.as_array().unwrap();
+        assert_eq!(arr3.len(), 1);
+        assert_eq!(arr3[0]["context_after"], serde_json::json!([]));
     }
 }

@@ -47,6 +47,12 @@ const DESCRIPTION: &str = "Recover a slice of a previously-summarised tool outpu
     `{mode:\"json_array_slice\", offset, len}` returns item range `arr[offset..offset+len]` of an array at the path; \
     `offset` accepts negatives — `-N` counts from the end (Python/JS slice semantics), \
     so `{mode:\"lines\", offset:-80, len:80}` returns the last 80 lines. Out-of-range offsets clamp. \
+    `{mode:\"grep\", pattern, ignore_case?, context?, max_matches?}` locates content instead of \
+    paging through it blindly: scans string leaves at or under `path` (the whole subtree if it's \
+    an object/array, not just a string) and returns matches as `{path, line, text, context_before, \
+    context_after}` — copy a match's `path` into a follow-up `lines` fetch (e.g. `{mode:\"lines\", \
+    offset: line - 5, len: 40}`) to read the surrounding region. `context` (default 2) is lines of \
+    context either side; `max_matches` (default 50) caps the result. Pair `grep` with `lines`. \
     `{mode:\"summary\"}` returns the curated `<summary>+<recovery>` envelope (ignores `path`), \
     bypassing the normal fetch response cap; compose advertises `normal_fetch_limit_bytes` \
     and each sub_invocation's `summary_envelope_bytes` before you fetch. \
