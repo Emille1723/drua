@@ -136,6 +136,7 @@ impl CoreReconcileTarget {
 #[async_trait::async_trait]
 impl ReconcileTarget for CoreReconcileTarget {
     fn install_proxy_toolsets(&self, row: &TunnelRegistrationRow) {
+        let log_tools = self.toolsets.all_tunnel_log_tools();
         let proxies: Vec<Arc<dyn SearchableToolSet>> = ProxyTunnelToolSet::build(
             &row.deployment_id,
             row.session_id,
@@ -143,6 +144,7 @@ impl ReconcileTarget for CoreReconcileTarget {
             &row.toolsets,
             Arc::clone(&self.http),
             Arc::clone(&self.auth),
+            &log_tools,
         )
         .into_iter()
         .map(|ts| Arc::new(ts) as Arc<dyn SearchableToolSet>)

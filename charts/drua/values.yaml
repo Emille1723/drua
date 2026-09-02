@@ -228,10 +228,21 @@ galoyAgents:
       enabled: false
       clientId: ""
       installationId: ""
+    ## Tools that dump raw logs on tunnel-registered toolsets, keyed by
+    ## the toolset name the connector registers. A tunnel's catalog
+    ## arrives at runtime from the connector, which can't declare what
+    ## its tools' output looks like — this does it instead, for every
+    ## deployment that registers that toolset. In-process toolsets and
+    ## configured MCP upstreams declare their own (see `logTools` on an
+    ## mcpUpstreams entry), so they don't belong here.
+    tunnelLogTools:
+      kubernetes:
+        - pods_log
+        - nodes_log
     ## Tool-output elision thresholds (the walker in drua-tool-caching).
-    ## Omit entirely to keep the crate's own defaults — see
-    ## research/tool-output-truncation-tuning-handoff-2026-09-02.md for
-    ## the tuning rationale. Example (uncomment to override):
+    ## Omit entirely to keep the crate's own defaults; set an entry here
+    ## only to overrule what a tool declares about its own output.
+    ## Example (uncomment to override):
     # toolCaching:
     #   genericThresholdBytes: 8192
     #   minHiddenBytes: 32768

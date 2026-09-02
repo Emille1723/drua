@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
-use drua_tool_caching::{extract_text, fetch_text_for_raw, tool_result_value, ToolCaching};
+use drua_tool_caching::{
+    extract_text, fetch_text_for_raw, tool_result_value, ToolCaching, ToolOutputShape,
+};
 use es_entity::context::{EventContext, WithEventContext};
 use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
@@ -219,7 +221,7 @@ impl TopLevelTool for ComposeTool {
                 // `cache_envelope` walks/persists identically but emits `T`
                 // verbatim, merging `_recovery`/`_elided` into the
                 // ComposeOutput root when the walker elides `result`.
-                tc.cache_envelope(subject, "compose", &recorded_args, ctr)
+                tc.cache_envelope(subject, "compose", &recorded_args, ctr, self.output_shape())
                     .await?
                     .result
             }
@@ -282,6 +284,7 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
             let parent_seed = EventContext::current().data();
             let started_at = chrono::Utc::now();
             let dispatcher = self.clone_for_persistence();
+            let output_shape = set.output_shape(&tool_name);
 
             return async move {
                 Audit::record_action(action);
@@ -308,6 +311,7 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
                                 &raw,
                                 duration_ms,
                                 started_at,
+                                output_shape,
                             )
                             .await;
                         Audit::record_success();
@@ -373,6 +377,7 @@ impl CatalogDispatcher {
         let started_at = chrono::Utc::now();
         let dispatcher = self.clone_for_persistence();
         let should_persist = tool.default_tool_caching();
+        let output_shape = tool.output_shape();
 
         async move {
             Audit::record_action(action);
@@ -400,6 +405,7 @@ impl CatalogDispatcher {
                                 &raw,
                                 duration_ms,
                                 started_at,
+                                output_shape,
                             )
                             .await;
                     }
@@ -445,6 +451,7 @@ impl CatalogDispatcherShared {
         raw: &CallToolResult,
         _duration_ms: u64,
         _started_at: chrono::DateTime<chrono::Utc>,
+        shape: ToolOutputShape,
     ) {
         let Some(tc) = self.tool_caching.as_ref() else {
             return;
@@ -453,7 +460,7 @@ impl CatalogDispatcherShared {
             .map(|bytes| bytes.len() as u64)
             .unwrap_or_else(|_| extract_text(raw).len() as u64);
         let Ok(resp) = tc
-            .persist_for_compose(&self.subject, tool_name, args, raw.clone())
+            .persist_for_compose(&self.subject, tool_name, args, raw.clone(), shape)
             .await
         else {
             return;

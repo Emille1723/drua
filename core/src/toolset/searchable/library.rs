@@ -806,9 +806,8 @@ mod tests {
 
     #[test]
     fn render_get_files_text_emits_full_body_under_new_cap() {
-        // 40 KB clears the old 8 KB cap but sits well under the new 64 KB
-        // per-file cap — the doc's p90 space-file size (46,141 chars) is
-        // in the same range.
+        // 40 KB is around the p90 space file: over the old 8 KB cap,
+        // comfortably under the new 64 KB one.
         let body = "y".repeat(40_000);
         let f = LibraryFileOutput {
             id: "id1".into(),

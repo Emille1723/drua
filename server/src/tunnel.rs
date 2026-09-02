@@ -228,7 +228,8 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
     let mut new_sets: Vec<std::sync::Arc<dyn SearchableToolSet>> =
         Vec::with_capacity(toolset_registrations.len());
     for reg in &toolset_registrations {
-        match OwnedTunnelToolSet::new(&deployment_id, session_id, reg, handle.clone()) {
+        let log_tools = state.app.toolsets().tunnel_log_tools(&reg.name);
+        match OwnedTunnelToolSet::new(&deployment_id, session_id, reg, handle.clone(), log_tools) {
             Ok(ts) => {
                 tracing::info!(
                     deployment_id = %deployment_id,

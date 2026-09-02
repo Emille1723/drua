@@ -1482,7 +1482,7 @@ mod tests {
         assert!(hint.contains("mode: \"summary\""), "got: {hint}");
     }
 
-    // ── Task 4: grep fetch mode ──
+    // ── grep fetch mode ──
 
     #[test]
     fn grep_returns_line_numbers_for_string_path() {

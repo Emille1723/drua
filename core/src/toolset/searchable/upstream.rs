@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use drua_tool_caching::extract_text;
+use drua_tool_caching::{extract_text, ToolOutputShape};
 use github_app::GitHubAppTokenProvider;
 use http::{HeaderName, HeaderValue};
 use rmcp::{
@@ -34,6 +34,9 @@ pub struct UpstreamToolSet {
     /// When true, hidden from non-agent subjects (Users, ExportedAgents,
     /// Anonymous). See [`McpUpstreamConfig::internal_only`].
     internal_only: bool,
+    /// Unprefixed tool names declared as log-shaped by config. See
+    /// [`McpUpstreamConfig::log_tools`].
+    log_tools: Vec<String>,
     tools: Vec<ToolSetEntry>,
     client: Arc<RwLock<RunningService<RoleClient, ()>>>,
     _refresh_task: Option<tokio::task::JoinHandle<()>>,
@@ -111,6 +114,7 @@ impl UpstreamToolSet {
             category_description: upstream.category_description.clone().unwrap_or_default(),
             required_scopes: upstream.required_scopes.clone().unwrap_or_default(),
             internal_only: upstream.internal_only,
+            log_tools: upstream.log_tools.clone(),
             tools,
             client,
             _refresh_task: refresh_task,
@@ -199,6 +203,14 @@ impl SearchableToolSet for UpstreamToolSet {
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         has_required_scopes(&self.required_scopes, subject)
             && (!self.internal_only || subject.is_agent())
+    }
+
+    fn output_shape(&self, tool_name: &str) -> ToolOutputShape {
+        if self.log_tools.iter().any(|t| t == tool_name) {
+            ToolOutputShape::Log
+        } else {
+            ToolOutputShape::Generic
+        }
     }
 
     async fn call(

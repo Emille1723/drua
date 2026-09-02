@@ -261,9 +261,8 @@ assert_summarized_text_matches() {
   # rows). Exceeds the 8KiB threshold so tool-caching elides head/tail
   # and renders a range-mode tool_output_fetch recovery template. Sized
   # so the elided (hidden) portion clears the min-hidden-bytes floor
-  # (32KB default, tool-output-truncation-tuning handoff Task 1) —
-  # the original ~13KB fixture hid only ~5KB and would now passthrough
-  # entirely, no longer exercising this test. Snapshot lives at
+  # (32KB default) — the original ~13KB fixture hid only ~5KB and would
+  # now passthrough entirely, no longer exercising this test. Snapshot lives at
   # bats/summarized-tool-responses/str-large-table.txt — open the file to
   # see exactly what the agent receives. Re-run with UPDATE_FIXTURES=1 to
   # regenerate after intentional envelope changes.
@@ -503,11 +502,10 @@ assert_compose_snapshot() {
   # copy-run and would compact it, but that compaction only hides
   # ~1.6KB — under the 32KB min-hidden-bytes floor (walker.rs's
   # `summarize`), so the floor discards it and passes the raw,
-  # uncompacted text through instead. This is the documented trade-off
-  # from the tool-output-truncation-tuning handoff, Task 1: chain
-  # compactions below the floor are sacrificed along with elision:
-  # real per-line savings here are tiny next to what a 100KB-context
-  # round trip would cost to recover them.
+  # uncompacted text through instead. Intended trade-off: chain
+  # compactions below the floor are sacrificed along with elision,
+  # because savings that small are dwarfed by what a round trip to
+  # recover them would cost.
   #
   # Snapshot shows the raw, uncompacted runs (no nix-* markers, no
   # <summary>/<recovery> envelope). UPDATE_FIXTURES=1 regens.

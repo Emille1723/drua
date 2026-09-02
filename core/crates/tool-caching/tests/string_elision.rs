@@ -1,26 +1,31 @@
 use drua_tool_caching::{
-    QueryStructure, StringSummarizerChain, ToolCachingConfig, ToolInvocationId, Walker,
+    ElisionBudget, QueryStructure, StringSummarizerChain, ToolCachingConfig, ToolInvocationId,
+    Walker,
 };
+
+/// Elide at `threshold_bytes`, never trip the floor — these tests
+/// exercise elision shape, not the floor.
+fn budget(threshold_bytes: usize) -> ElisionBudget {
+    ElisionBudget {
+        threshold_bytes,
+        min_hidden_bytes: 0,
+    }
+}
 
 /// Multi-line content goes through line-mode: head + tail are line
 /// counts, recovery uses `mode: "lines"`.
 #[test]
 fn multi_line_string_uses_line_mode() {
-    let config = ToolCachingConfig {
-        generic_threshold_bytes: 256,
-        // This test exercises line-mode elision shape, not the
-        // min-hidden-bytes floor — disable it so the small fixture
-        // still elides as before.
-        min_hidden_bytes: 0,
-        ..ToolCachingConfig::default()
-    };
-    let walker = Walker::new(std::sync::Arc::new(StringSummarizerChain::new()), &config);
+    let walker = Walker::new(
+        std::sync::Arc::new(StringSummarizerChain::new()),
+        &ToolCachingConfig::default(),
+    );
 
     let lines: Vec<String> = (0..200).map(|i| format!("line {i}")).collect();
     let big = lines.join("\n");
     let q = QueryStructure::new(&big);
     let invocation_id = ToolInvocationId::new();
-    let summary = walker.summarize(&q, invocation_id, "test");
+    let summary = walker.summarize(&q, invocation_id, "test", budget(256));
 
     assert_eq!(summary.elided_paths.len(), 1);
     let entry = &summary.elided_paths[0];
@@ -48,19 +53,14 @@ fn multi_line_string_uses_line_mode() {
 /// Single-line content (no usable newline split) falls back to byte-mode.
 #[test]
 fn single_line_string_falls_back_to_byte_mode() {
-    let config = ToolCachingConfig {
-        generic_threshold_bytes: 1024,
-        // This test exercises byte-mode elision shape, not the
-        // min-hidden-bytes floor — disable it so the small fixture
-        // still elides as before.
-        min_hidden_bytes: 0,
-        ..ToolCachingConfig::default()
-    };
-    let walker = Walker::new(std::sync::Arc::new(StringSummarizerChain::new()), &config);
+    let walker = Walker::new(
+        std::sync::Arc::new(StringSummarizerChain::new()),
+        &ToolCachingConfig::default(),
+    );
 
     let big = "x".repeat(5000);
     let q = QueryStructure::new(&big);
-    let summary = walker.summarize(&q, ToolInvocationId::new(), "test");
+    let summary = walker.summarize(&q, ToolInvocationId::new(), "test", budget(1024));
 
     assert_eq!(summary.elided_paths.len(), 1);
     let entry = &summary.elided_paths[0];
@@ -82,14 +82,13 @@ fn single_line_string_falls_back_to_byte_mode() {
 #[test]
 fn root_string_below_threshold_passes_through() {
     let config = ToolCachingConfig {
-        generic_threshold_bytes: 1024,
         ..ToolCachingConfig::default()
     };
     let walker = Walker::new(std::sync::Arc::new(StringSummarizerChain::new()), &config);
 
     let small = "just a short line".to_string();
     let q = QueryStructure::new(&small);
-    let summary = walker.summarize(&q, ToolInvocationId::new(), "test");
+    let summary = walker.summarize(&q, ToolInvocationId::new(), "test", budget(1024));
 
     assert!(summary.elided_paths.is_empty());
     assert_eq!(summary.summary.as_str(), Some(small.as_str()));

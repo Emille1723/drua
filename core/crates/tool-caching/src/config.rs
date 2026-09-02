@@ -6,13 +6,6 @@ const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 8192;
 const DEFAULT_SENTINEL_HARD_CAP_BYTES: usize = 16 * 1024;
 const DEFAULT_SENTINEL_MIN_BYTES: usize = 512;
 const DEFAULT_MAX_FETCH_RESPONSE_BYTES: usize = 16 * 1024;
-/// Below this many hidden bytes, eliding costs more than it saves: the
-/// round trip through `tool_output_fetch` is worth roughly 100 KB of
-/// context-equivalent (see `research/tool-output-truncation-tuning-
-/// handoff-2026-09-02.md` §1), so hiding a few hundred bytes to save a
-/// marker is a net loss. `MIN_ELIDE_BYTES` (`walker.rs`) already guards
-/// the degenerate "marker costs more than the bytes it replaces" case;
-/// this is the same idea with the round-trip cost priced in.
 const DEFAULT_MIN_HIDDEN_BYTES: usize = 32 * 1024;
 
 /// Knobs the walker actually reads. Per-string head/tail counts are
@@ -57,6 +50,58 @@ pub struct ToolCachingOverride {
     pub generic_threshold_bytes: Option<usize>,
     #[serde(default)]
     pub min_hidden_bytes: Option<usize>,
+}
+
+/// What kind of payload a tool emits, declared by the tool itself (a
+/// trait method for in-process tools, upstream config for proxied MCP
+/// servers) and passed down at call time. Read-fraction — the share of
+/// a payload the caller actually wants — is a property of the tool, not
+/// of the byte count, so the tool is the only place that knows this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputShape {
+    /// Structured results, documents, API responses. Elision competes
+    /// with the recovery round trip, so the min-hidden-bytes floor
+    /// applies.
+    #[default]
+    Generic,
+    /// A raw log or dump: the caller wants the tail, reads a fraction of
+    /// it, and rarely recovers the rest. Elision earns its keep at any
+    /// size here, so the floor does not apply.
+    Log,
+}
+
+/// The elision knobs resolved for one call, in precedence order:
+/// global config → the tool's declared [`ToolOutputShape`] → operator
+/// `per_tool` override. [`crate::Walker`] consumes these and makes no
+/// per-tool decisions of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ElisionBudget {
+    pub threshold_bytes: usize,
+    pub min_hidden_bytes: usize,
+}
+
+impl ToolCachingConfig {
+    pub fn budget_for(&self, tool_name: &str, shape: ToolOutputShape) -> ElisionBudget {
+        let mut budget = ElisionBudget {
+            threshold_bytes: self.generic_threshold_bytes,
+            min_hidden_bytes: match shape {
+                ToolOutputShape::Generic => self.min_hidden_bytes,
+                ToolOutputShape::Log => 0,
+            },
+        };
+        // Operator config is last so a deployment can always overrule a
+        // tool's own declaration.
+        if let Some(over) = self.per_tool.get(tool_name) {
+            if let Some(threshold) = over.generic_threshold_bytes {
+                budget.threshold_bytes = threshold;
+            }
+            if let Some(min_hidden) = over.min_hidden_bytes {
+                budget.min_hidden_bytes = min_hidden;
+            }
+        }
+        budget
+    }
 }
 
 impl Default for ToolCachingConfig {
@@ -113,5 +158,80 @@ mod tests {
         let cfg: ToolCachingConfig = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(cfg.min_hidden_bytes, DEFAULT_MIN_HIDDEN_BYTES);
         assert!(cfg.per_tool.is_empty());
+    }
+
+    #[test]
+    fn generic_shape_takes_the_global_budget() {
+        let cfg = ToolCachingConfig::default();
+        assert_eq!(
+            cfg.budget_for("some_tool", ToolOutputShape::Generic),
+            ElisionBudget {
+                threshold_bytes: DEFAULT_GENERIC_THRESHOLD_BYTES,
+                min_hidden_bytes: DEFAULT_MIN_HIDDEN_BYTES,
+            }
+        );
+    }
+
+    /// A log tool elides at any size: the caller reads a fraction of the
+    /// payload and rarely recovers the rest, so the round-trip argument
+    /// the floor encodes doesn't apply.
+    #[test]
+    fn log_shape_drops_the_floor_but_keeps_the_threshold() {
+        let cfg = ToolCachingConfig::default();
+        let budget = cfg.budget_for("some_log_tool", ToolOutputShape::Log);
+        assert_eq!(budget.min_hidden_bytes, 0);
+        assert_eq!(budget.threshold_bytes, DEFAULT_GENERIC_THRESHOLD_BYTES);
+    }
+
+    #[test]
+    fn per_tool_override_beats_the_declared_shape() {
+        let mut per_tool = HashMap::new();
+        per_tool.insert(
+            "noisy_log_tool".to_string(),
+            ToolCachingOverride {
+                generic_threshold_bytes: Some(65_536),
+                min_hidden_bytes: Some(4_096),
+            },
+        );
+        let cfg = ToolCachingConfig {
+            per_tool,
+            ..ToolCachingConfig::default()
+        };
+
+        // Log would zero the floor; the operator's 4 KB wins.
+        assert_eq!(
+            cfg.budget_for("noisy_log_tool", ToolOutputShape::Log),
+            ElisionBudget {
+                threshold_bytes: 65_536,
+                min_hidden_bytes: 4_096,
+            }
+        );
+        // Tools without an entry are untouched by it.
+        assert_eq!(
+            cfg.budget_for("other_tool", ToolOutputShape::Log)
+                .threshold_bytes,
+            DEFAULT_GENERIC_THRESHOLD_BYTES
+        );
+    }
+
+    /// A partial override leaves the field it doesn't set to whatever the
+    /// shape resolved it to.
+    #[test]
+    fn partial_override_leaves_other_fields_to_the_shape() {
+        let mut per_tool = HashMap::new();
+        per_tool.insert(
+            "doc_tool".to_string(),
+            ToolCachingOverride {
+                generic_threshold_bytes: Some(65_536),
+                min_hidden_bytes: None,
+            },
+        );
+        let cfg = ToolCachingConfig {
+            per_tool,
+            ..ToolCachingConfig::default()
+        };
+        let budget = cfg.budget_for("doc_tool", ToolOutputShape::Log);
+        assert_eq!(budget.threshold_bytes, 65_536);
+        assert_eq!(budget.min_hidden_bytes, 0, "shape still applies");
     }
 }

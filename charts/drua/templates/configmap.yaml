@@ -201,6 +201,15 @@ data:
         stack_limit_bytes: {{ printf "%d" (int .stackLimitBytes) }}
         timeout_ms: {{ printf "%d" (int .timeoutMs) }}
       {{- end }}
+      {{- with .Values.galoyAgents.config.tunnelLogTools }}
+      tunnel_log_tools:
+        {{- range $toolset, $tools := . }}
+        {{ $toolset }}:
+          {{- range $tools }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
       {{- $hasUpstreams := .Values.galoyAgents.config.mcpUpstreams }}
       {{- $k8sMcp := index .Values "kubernetes-mcp-server" }}
       {{- $pgMcp := .Values.galoyAgents.postgresMcp }}
@@ -227,6 +236,12 @@ data:
           {{- if .allowedTools }}
           allowed_tools:
           {{- range .allowedTools }}
+            - {{ . | quote }}
+          {{- end }}
+          {{- end }}
+          {{- if .logTools }}
+          log_tools:
+          {{- range .logTools }}
             - {{ . | quote }}
           {{- end }}
           {{- end }}
@@ -264,6 +279,9 @@ data:
             - "pods_log"
             - "resources_list"
             - "resources_get"
+          log_tools:
+            - "pods_log"
+            - "nodes_log"
       {{- end }}
       {{- if and $pgMcp $pgMcp.enabled }}
         - name: "postgres"
@@ -287,21 +305,24 @@ data:
     {{- end }}
     {{- with .Values.galoyAgents.config.toolCaching }}
     tool_caching:
-      {{- with .genericThresholdBytes }}
-      generic_threshold_bytes: {{ . }}
+      {{- /* hasKey, not `with`: these are byte counts and `with` treats 0
+             as empty, so `minHiddenBytes: 0` — how you disable the floor
+             for a tool — would silently fall back to the crate default. */}}
+      {{- if hasKey . "genericThresholdBytes" }}
+      generic_threshold_bytes: {{ .genericThresholdBytes }}
       {{- end }}
-      {{- with .minHiddenBytes }}
-      min_hidden_bytes: {{ . }}
+      {{- if hasKey . "minHiddenBytes" }}
+      min_hidden_bytes: {{ .minHiddenBytes }}
       {{- end }}
       {{- with .perTool }}
       per_tool:
         {{- range $tool, $override := . }}
         {{ $tool }}:
-          {{- with $override.genericThresholdBytes }}
-          generic_threshold_bytes: {{ . }}
+          {{- if hasKey $override "genericThresholdBytes" }}
+          generic_threshold_bytes: {{ $override.genericThresholdBytes }}
           {{- end }}
-          {{- with $override.minHiddenBytes }}
-          min_hidden_bytes: {{ . }}
+          {{- if hasKey $override "minHiddenBytes" }}
+          min_hidden_bytes: {{ $override.minHiddenBytes }}
           {{- end }}
         {{- end }}
       {{- end }}

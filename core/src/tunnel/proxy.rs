@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use drua_tool_caching::ToolOutputShape;
 use rmcp::model::{CallToolResult, JsonObject, Tool};
 
 use crate::auth::AuthSubject;
@@ -14,6 +16,9 @@ pub struct ProxyTunnelToolSet {
     category_description: String,
     upstream_name: String,
     tools: Vec<ToolSetEntry>,
+    /// Unprefixed names this toolset's connector serves as raw logs.
+    /// See [`crate::toolset::ToolSetsConfig::tunnel_log_tools`].
+    log_tools: Vec<String>,
     deployment_id: String,
     session_id: uuid::Uuid,
     owner_pod_addr: String,
@@ -30,6 +35,7 @@ impl ProxyTunnelToolSet {
         registrations: &[RegisteredToolSet],
         http: Arc<reqwest::Client>,
         auth: Arc<InternalAuth>,
+        log_tools: &HashMap<String, Vec<String>>,
     ) -> Vec<Self> {
         registrations
             .iter()
@@ -56,6 +62,7 @@ impl ProxyTunnelToolSet {
                     category_description: reg.category_description.clone(),
                     upstream_name: reg.name.clone(),
                     tools,
+                    log_tools: log_tools.get(&reg.name).cloned().unwrap_or_default(),
                     deployment_id: deployment_id.to_string(),
                     session_id,
                     owner_pod_addr: owner_pod_addr.to_string(),
@@ -91,6 +98,14 @@ impl SearchableToolSet for ProxyTunnelToolSet {
     }
     fn scope(&self) -> Option<&ToolSetScope> {
         Some(&self.scope)
+    }
+
+    fn output_shape(&self, tool_name: &str) -> ToolOutputShape {
+        if self.log_tools.iter().any(|t| t == tool_name) {
+            ToolOutputShape::Log
+        } else {
+            ToolOutputShape::Generic
+        }
     }
 
     async fn call(
@@ -188,6 +203,7 @@ mod tests {
             &[registration("kubernetes")],
             http,
             auth,
+            &HashMap::new(),
         );
         let err = proxies[0]
             .call(&AuthSubject::Anonymous, "list_pods", None)
@@ -217,6 +233,7 @@ mod tests {
             &regs,
             http,
             auth,
+            &HashMap::new(),
         );
         assert_eq!(proxies.len(), 2);
         assert_eq!(proxies[0].name(), "galoy_staging_kubernetes");
@@ -228,6 +245,46 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A tunnel's catalog arrives from a remote connector that can't say
+    /// what its tools' output looks like, so config declares it per
+    /// registered toolset — keyed by toolset, not deployment, so a newly
+    /// connected deployment inherits it.
+    #[test]
+    fn log_tools_config_marks_matching_tools_as_log_shaped() {
+        let Some(http) = try_test_client() else {
+            return;
+        };
+        let mut log_tools = HashMap::new();
+        log_tools.insert(
+            "kubernetes".to_string(),
+            vec!["pods_log".to_string(), "nodes_log".to_string()],
+        );
+        let proxies = ProxyTunnelToolSet::build(
+            "galoy-staging",
+            uuid::Uuid::new_v4(),
+            "10.0.0.1:4200",
+            &[registration("kubernetes"), registration("postgres")],
+            Arc::new(http),
+            Arc::new(InternalAuth::SharedSecret {
+                secret: "x".to_string(),
+            }),
+            &log_tools,
+        );
+
+        assert_eq!(proxies[0].output_shape("pods_log"), ToolOutputShape::Log);
+        assert_eq!(proxies[0].output_shape("nodes_log"), ToolOutputShape::Log);
+        assert_eq!(
+            proxies[0].output_shape("pods_list"),
+            ToolOutputShape::Generic,
+            "unlisted tools on a declared toolset stay generic"
+        );
+        assert_eq!(
+            proxies[1].output_shape("pods_log"),
+            ToolOutputShape::Generic,
+            "a toolset with no entry declares nothing"
+        );
     }
 
     #[tokio::test]
@@ -246,6 +303,7 @@ mod tests {
             &[registration("kubernetes")],
             http,
             auth,
+            &HashMap::new(),
         );
         let result = proxies[0]
             .call(&AuthSubject::Anonymous, "list_pods", None)

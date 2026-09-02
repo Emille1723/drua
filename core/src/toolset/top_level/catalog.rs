@@ -626,9 +626,15 @@ impl TopLevelTool for CallCatalogTool {
                 let args_for_cache = inner_args
                     .map(serde_json::Value::Object)
                     .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                tc.cache(subject, &tool_name, &args_for_cache, result)
-                    .await?
-                    .result
+                tc.cache(
+                    subject,
+                    &tool_name,
+                    &args_for_cache,
+                    result,
+                    set.output_shape(&name),
+                )
+                .await?
+                .result
             }
             None => result,
         };

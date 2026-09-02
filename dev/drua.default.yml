@@ -22,6 +22,7 @@ agents:
   models: {}
 toolsets:
   mcp_upstreams: []
+  tunnel_log_tools: {}
   concourse:
     enabled: false
     url: ''

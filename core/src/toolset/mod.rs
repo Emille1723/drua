@@ -136,6 +136,9 @@ pub struct ToolSets {
     audit: Option<Arc<Audit>>,
     /// `None` only in tests without a DB pool.
     tool_caching: Option<Arc<ToolCaching>>,
+    /// See [`ToolSetsConfig::tunnel_log_tools`]. Held here because tunnel
+    /// toolsets are built long after `init`, from connector registrations.
+    tunnel_log_tools: HashMap<String, Vec<String>>,
     init_errors: Vec<(String, String)>,
 }
 
@@ -241,8 +244,23 @@ impl ToolSets {
             top_level,
             audit,
             tool_caching,
+            tunnel_log_tools: config.tunnel_log_tools.clone(),
             init_errors,
         })
+    }
+
+    /// Tools that dump raw logs on a tunnel-registered toolset, by the
+    /// name the connector registered it under.
+    pub fn tunnel_log_tools(&self, toolset_name: &str) -> Vec<String> {
+        self.tunnel_log_tools
+            .get(toolset_name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The whole map, for building a batch of tunnel toolsets at once.
+    pub fn all_tunnel_log_tools(&self) -> HashMap<String, Vec<String>> {
+        self.tunnel_log_tools.clone()
     }
 
     /// Log upstream init results. Must be called from OUTSIDE
@@ -603,6 +621,7 @@ impl ToolSets {
             }));
 
             let default_cache = tool.default_tool_caching();
+            let output_shape = tool.output_shape();
             // Cheap to compute upfront (fast `None` unless the args are
             // exactly a lone `{arguments: {…}}` wrapper), so `arguments` can
             // move into the first call without a clone.
@@ -636,7 +655,9 @@ impl ToolSets {
                             let args_for_cache = args_value
                                 .clone()
                                 .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                            tc.cache(subject, name, &args_for_cache, raw).await?.result
+                            tc.cache(subject, name, &args_for_cache, raw, output_shape)
+                                .await?
+                                .result
                         }
                         _ => raw,
                     };
@@ -689,6 +710,7 @@ impl ToolSets {
             top_level: Arc::new(RwLock::new(HashMap::new())),
             audit: None,
             tool_caching: None,
+            tunnel_log_tools: HashMap::new(),
             init_errors: Vec::new(),
         }
     }

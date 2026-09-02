@@ -22,6 +22,7 @@ async fn init_toolsets() {
             category_description: Some("Distributed traces, SLOs, and query analysis".to_string()),
             tool_prefix: None,
             allowed_tools: None,
+            log_tools: Vec::new(),
             required_scopes: None,
             internal_only: false,
             auth_mode: Default::default(),

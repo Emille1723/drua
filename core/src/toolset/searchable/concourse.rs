@@ -1,6 +1,7 @@
 use std::sync::{Arc, LazyLock};
 
 use concourse_client::ConcourseClient;
+use drua_tool_caching::ToolOutputShape;
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 use serde::Deserialize;
 
@@ -502,6 +503,13 @@ impl SearchableToolSet for ConcourseToolSet {
         &self.tools
     }
 
+    fn output_shape(&self, tool_name: &str) -> ToolOutputShape {
+        match tool_name {
+            "get_build_logs" | "get_resource_check_logs" => ToolOutputShape::Log,
+            _ => ToolOutputShape::Generic,
+        }
+    }
+
     async fn call(
         &self,
         _subject: &AuthSubject,
@@ -770,6 +778,48 @@ fn extract_get_steps(plan: &[serde_json::Value], out: &mut Vec<serde_json::Value
                     extract_get_steps(arr, out);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toolset() -> ConcourseToolSet {
+        ConcourseToolSet::new(
+            ConcourseClient::new(
+                "http://concourse.test",
+                "main".into(),
+                "u".into(),
+                "p".into(),
+            )
+            .expect("client builds without I/O"),
+        )
+    }
+
+    /// Build and check logs are raw CI output: the caller wants the tail
+    /// and rarely recovers the rest, so they stay summarised at any size
+    /// rather than competing with the min-hidden-bytes floor.
+    #[test]
+    fn log_tools_declare_themselves_log_shaped() {
+        let set = toolset();
+        assert_eq!(set.output_shape("get_build_logs"), ToolOutputShape::Log);
+        assert_eq!(
+            set.output_shape("get_resource_check_logs"),
+            ToolOutputShape::Log
+        );
+    }
+
+    #[test]
+    fn structured_tools_stay_generic() {
+        let set = toolset();
+        for name in ["list_pipelines", "list_jobs", "get_build_status"] {
+            assert_eq!(
+                set.output_shape(name),
+                ToolOutputShape::Generic,
+                "{name} returns structured data, not a log"
+            );
         }
     }
 }

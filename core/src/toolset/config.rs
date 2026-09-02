@@ -6,6 +6,15 @@ use crate::primitives::AuthScope;
 pub struct ToolSetsConfig {
     #[serde(default)]
     pub mcp_upstreams: Vec<McpUpstreamConfig>,
+    /// Log-shaped tool names per tunnel-registered toolset, keyed by the
+    /// name the connector registers (e.g. `kubernetes`). A tunnel's
+    /// catalog arrives at runtime from a remote connector that can't say
+    /// what its tools' output looks like, so this stands in for the
+    /// `log_tools` an [`McpUpstreamConfig`] would carry. Keyed by
+    /// toolset rather than deployment, so a newly connected deployment
+    /// inherits it instead of silently losing the tuning.
+    #[serde(default)]
+    pub tunnel_log_tools: std::collections::HashMap<String, Vec<String>>,
     #[serde(default)]
     pub concourse: ConcourseToolSetConfig,
     #[serde(default)]
@@ -129,6 +138,13 @@ pub struct McpUpstreamConfig {
     pub tool_prefix: Option<String>,
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+    /// Unprefixed names of tools on this upstream that return a raw log
+    /// or dump (`pods_log`, `nodes_log`, …). A remote MCP server can't
+    /// tell drua what its output looks like, so this is where that gets
+    /// declared: listed tools are summarised at any size instead of
+    /// competing with tool-caching's min-hidden-bytes floor.
+    #[serde(default)]
+    pub log_tools: Vec<String>,
     /// Empty means unrestricted.
     #[serde(default)]
     pub required_scopes: Option<Vec<AuthScope>>,
@@ -177,4 +193,59 @@ pub struct ZendutyToolSetConfig {
     pub default_team: String,
     #[serde(skip)]
     pub api_token: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Helm chart renders these keys; a rename on either side would
+    /// silently drop the declaration and put log tools back under the
+    /// min-hidden-bytes floor.
+    #[test]
+    fn upstream_log_tools_parse_from_yaml() {
+        let cfg: ToolSetsConfig = serde_yaml::from_str(
+            r#"
+mcp_upstreams:
+  - name: kubernetes
+    url: http://k8s-mcp:8080/mcp
+    tool_prefix: k8s
+    log_tools:
+      - pods_log
+      - nodes_log
+"#,
+        )
+        .expect("upstream config with log_tools parses");
+        assert_eq!(cfg.mcp_upstreams[0].log_tools, ["pods_log", "nodes_log"]);
+    }
+
+    #[test]
+    fn upstream_without_log_tools_defaults_to_empty() {
+        let cfg: ToolSetsConfig = serde_yaml::from_str(
+            r#"
+mcp_upstreams:
+  - name: github
+    url: http://gh:8080/mcp
+"#,
+        )
+        .expect("upstream config without log_tools parses");
+        assert!(cfg.mcp_upstreams[0].log_tools.is_empty());
+    }
+
+    #[test]
+    fn tunnel_log_tools_parse_from_yaml() {
+        let cfg: ToolSetsConfig = serde_yaml::from_str(
+            r#"
+tunnel_log_tools:
+  kubernetes:
+    - pods_log
+    - nodes_log
+"#,
+        )
+        .expect("tunnel_log_tools parses");
+        assert_eq!(
+            cfg.tunnel_log_tools.get("kubernetes").unwrap(),
+            &["pods_log".to_string(), "nodes_log".to_string()]
+        );
+    }
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::config::ToolCachingConfig;
+use crate::config::{ElisionBudget, ToolCachingConfig};
 use crate::fetch::{
     ceil_char_boundary, fetch_text_size_at_path, floor_char_boundary,
     resolve_utf8_byte_window_usize as resolve_utf8_byte_window,
@@ -28,61 +28,42 @@ struct WalkCtx<'a> {
     primary_raw_string: Option<&'a str>,
     /// Mirror of the preprocessor's `prefer_tail`; only honored at `primary_path`.
     primary_prefer_tail: bool,
+    /// Budget for the array-truncation shrink loop, derived once from
+    /// this call's threshold so `truncate_array` doesn't need the walker.
+    sentinel_budget: usize,
 }
 
 #[derive(Clone)]
 pub struct Walker {
     chain: Arc<StringSummarizerChain>,
-    threshold_bytes: usize,
     sentinel_min_bytes: usize,
     sentinel_hard_cap_bytes: usize,
     max_fetch_response_bytes: usize,
-    min_hidden_bytes: usize,
-    per_tool: std::collections::HashMap<String, crate::config::ToolCachingOverride>,
 }
 
 impl Walker {
     pub fn new(chain: Arc<StringSummarizerChain>, config: &ToolCachingConfig) -> Self {
         Self {
             chain,
-            threshold_bytes: config.generic_threshold_bytes,
             sentinel_min_bytes: config.sentinel_min_bytes,
             sentinel_hard_cap_bytes: config.sentinel_hard_cap_bytes,
             max_fetch_response_bytes: config.max_fetch_response_bytes,
-            min_hidden_bytes: config.min_hidden_bytes,
-            per_tool: config.per_tool.clone(),
         }
     }
 
-    fn sentinel_budget(&self) -> usize {
-        self.threshold_bytes
-            .clamp(self.sentinel_min_bytes, self.sentinel_hard_cap_bytes)
+    fn sentinel_budget(&self, threshold_bytes: usize) -> usize {
+        threshold_bytes.clamp(self.sentinel_min_bytes, self.sentinel_hard_cap_bytes)
     }
 
-    /// Resolve `generic_threshold_bytes` for `tool_name`, falling back to
-    /// the global default when the tool has no override (or the override
-    /// doesn't set this field).
-    fn threshold_for(&self, tool_name: &str) -> usize {
-        self.per_tool
-            .get(tool_name)
-            .and_then(|o| o.generic_threshold_bytes)
-            .unwrap_or(self.threshold_bytes)
-    }
-
-    /// Resolve `min_hidden_bytes` for `tool_name`, same fallback rule as
-    /// [`Walker::threshold_for`].
-    fn min_hidden_bytes_for(&self, tool_name: &str) -> usize {
-        self.per_tool
-            .get(tool_name)
-            .and_then(|o| o.min_hidden_bytes)
-            .unwrap_or(self.min_hidden_bytes)
-    }
-
+    /// `budget` is resolved per call by [`ToolCachingConfig::budget_for`]
+    /// from the calling tool's declared shape plus operator config — the
+    /// walker applies it and never decides anything per tool itself.
     pub fn summarize(
         &self,
         query_structure: &QueryStructure,
         invocation_id: ToolInvocationId,
         tool_name: &str,
+        budget: ElisionBudget,
     ) -> ToolCallSummary {
         // Preprocessor (if registered for this tool) owns its shape: it
         // returns a transformed root with text in-place cleaned, plus
@@ -116,11 +97,12 @@ impl Walker {
             primary_raw_bytes,
             primary_raw_string,
             primary_prefer_tail,
+            sentinel_budget: self.sentinel_budget(budget.threshold_bytes),
         };
         let wire_result = self.walk(
             root_for_walk,
             "$",
-            self.threshold_for(tool_name),
+            budget.threshold_bytes,
             &ctx,
             &mut elided_paths,
         );
@@ -141,36 +123,19 @@ impl Walker {
         let total_bytes = byte_size(raw_at_primary);
         let shown_bytes = byte_size(&summary);
 
-        // Floor: eliding to hide fewer than `min_hidden_bytes` costs more
-        // (one `tool_output_fetch` round trip, ~100 KB of context) than it
-        // saves. Reuse the root totals computed above rather than summing
-        // over `elided_paths` — nested paths would double-count. Return
-        // the untouched original root: for non-preprocessed tools this is
-        // exactly the un-elided `wire_result`.
+        // Floor: hiding fewer than `min_hidden_bytes` costs more (one
+        // `tool_output_fetch` round trip, worth ~100 KB of context) than
+        // it saves, so pass the whole value through instead. Root totals,
+        // not a sum over `elided_paths` — nested paths would double-count.
         //
-        // Log-shaped tools are exempt by construction, not by assuming
-        // their raw-vs-shown gap always clears the floor — a production
-        // check against real invocations found that assumption false and
-        // not marginal: 23% of `concourse_get_build_logs` (3,849/16,560)
-        // and up to 47% of `*_pods_log` calls hide fewer than 32 KB
-        // (typically tens of KB eliding to a few KB shown). Two distinct
-        // exemptions are needed because only concourse has an actual
-        // preprocessor in this crate — the doc's "concourse/k8s" grouping
-        // doesn't hold in code:
-        //   - `preprocessed.is_none()`: for concourse (and any future
-        //     preprocessor-backed tool), falling through to the generic
-        //     bypass would swap a small, cleaned, elided summary for the
-        //     full *raw* log (ANSI/timestamps intact) — the opposite of
-        //     what these tools are tuned for.
-        //   - `!is_floor_exempt_tool(tool_name)`: k8s pod/node logs have
-        //     no preprocessor to detect, so they're matched by name —
-        //     same reasoning as `preprocessors::concourse::TOOL_NAMES`.
-        // Either way, logs always elide per their own budget regardless
-        // of size — see `small_concourse_log_...`/`pods_log_tool_...`
-        // floor tests below.
+        // Preprocessed payloads never take this branch whatever the
+        // budget says: the bypass hands back `query_structure.root`, which
+        // for a log tool is the raw text with the ANSI escapes and
+        // timestamps the preprocessor just stripped. Swapping a small
+        // cleaned summary for a bigger dirty one is never the right
+        // trade, so the guard belongs here rather than in the budget.
         if preprocessed.is_none()
-            && !is_floor_exempt_tool(tool_name)
-            && total_bytes.saturating_sub(shown_bytes) < self.min_hidden_bytes_for(tool_name) as u64
+            && total_bytes.saturating_sub(shown_bytes) < budget.min_hidden_bytes as u64
         {
             let root = query_structure.root.clone();
             return ToolCallSummary {
@@ -295,7 +260,7 @@ impl Walker {
             n,
             original_bytes,
             path,
-            ctx.invocation_id,
+            ctx,
             paths_before,
             elided_paths,
         )
@@ -473,7 +438,7 @@ impl Walker {
         original_length: usize,
         original_bytes: u64,
         path: &str,
-        invocation_id: ToolInvocationId,
+        ctx: &WalkCtx,
         paths_before: usize,
         elided_paths: &mut Vec<ElidedPath>,
     ) -> Value {
@@ -482,7 +447,8 @@ impl Walker {
         // agent can slice `[K..N)` via `tool_output_fetch` if they need
         // more. Head+tail would be ambiguous on the wire — without a
         // delimiter the agent can't tell where the gap lives.
-        let budget = self.sentinel_budget();
+        let invocation_id = ctx.invocation_id;
+        let budget = ctx.sentinel_budget;
         let n = walked.len();
         let mut head_count = n.saturating_sub(1);
         let mut truncated = make_truncated_array(walked, head_count);
@@ -570,27 +536,6 @@ fn parse_array_index(elided_path: &str, container_path: &str) -> Option<usize> {
 /// Smallest value worth eliding. Below this, marker overhead exceeds
 /// any byte savings — passthrough is strictly cheaper.
 const MIN_ELIDE_BYTES: usize = 512;
-
-/// Tool-name suffixes for tools that always emit a large raw log/dump
-/// shape, matched suffix-wise (same convention as
-/// `preprocessors::concourse::TOOL_NAMES`) so a catalog prefix like
-/// `galoy_staging_kubernetes_pods_log` still matches. These have no
-/// preprocessor in this crate, so [`Walker::summarize`]'s min-hidden-
-/// bytes floor can't rely on `preprocessed.is_some()` to exempt them —
-/// see the floor's comment for the production numbers that made this
-/// exemption necessary.
-const FLOOR_EXEMPT_TOOL_SUFFIXES: &[&str] = &[
-    "pods_log",
-    "nodes_log",
-    "get_build_logs",
-    "get_resource_check_logs",
-];
-
-fn is_floor_exempt_tool(tool_name: &str) -> bool {
-    FLOOR_EXEMPT_TOOL_SUFFIXES
-        .iter()
-        .any(|suffix| tool_name.ends_with(suffix))
-}
 
 fn json_size(value: &Value) -> u64 {
     serde_json::to_string(value)
@@ -1188,16 +1133,30 @@ mod tests {
     fn walker_with_fetch_cap(max_fetch: usize) -> Walker {
         let config = ToolCachingConfig {
             // Force array-truncation by making the array budget small.
-            generic_threshold_bytes: 512,
             sentinel_min_bytes: 512,
             sentinel_hard_cap_bytes: 1024,
             max_fetch_response_bytes: max_fetch,
-            // These tests exercise array-truncation shape, not the floor —
-            // disable it so small fixtures still elide as before.
-            min_hidden_bytes: 0,
             ..ToolCachingConfig::default()
         };
         Walker::new(Arc::new(StringSummarizerChain::new()), &config)
+    }
+
+    /// Elide at `threshold_bytes`, never trip the floor — what most of
+    /// these tests want, since they exercise elision mechanics rather
+    /// than the floor. Floor tests build their own budget.
+    fn budget(threshold_bytes: usize) -> ElisionBudget {
+        ElisionBudget {
+            threshold_bytes,
+            min_hidden_bytes: 0,
+        }
+    }
+
+    /// Production-shaped budget: 8 KB elision threshold, 32 KB floor.
+    fn floor_budget() -> ElisionBudget {
+        ElisionBudget {
+            threshold_bytes: 8192,
+            min_hidden_bytes: 32 * 1024,
+        }
     }
 
     /// Object of `n_fields` numeric fields — exceeds the array budget
@@ -1223,7 +1182,7 @@ mod tests {
             root: Value::Array(items),
         };
         let walker = walker_with_fetch_cap(1024);
-        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool");
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool", budget(512));
 
         // Find the aggregate `$` elided path (the truncation marker).
         let agg = summary
@@ -1277,7 +1236,7 @@ mod tests {
             root: Value::Array(items),
         };
         let walker = walker_with_fetch_cap(1024);
-        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool");
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool", budget(512));
 
         let agg = summary
             .elided_paths
@@ -1350,7 +1309,7 @@ mod tests {
             root: Value::Array(items),
         };
         let walker = walker_with_fetch_cap(16 * 1024);
-        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool");
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool", budget(512));
 
         let agg = summary
             .elided_paths
@@ -1417,7 +1376,12 @@ mod tests {
             root: serde_json::json!({ "logs": logs }),
         };
         let walker = walker_for_line_split();
-        let summary = walker.summarize(&qs, ToolInvocationId::new(), "concourse-build-log");
+        let summary = walker.summarize(
+            &qs,
+            ToolInvocationId::new(),
+            "concourse-build-log",
+            budget(200),
+        );
         let body = summary.summary.as_str().expect("logs summary is string");
         let head_count = body
             .lines()
@@ -1454,7 +1418,7 @@ mod tests {
             root: Value::String(logs),
         };
         let walker = walker_for_line_split();
-        let summary = walker.summarize(&qs, ToolInvocationId::new(), "unknown_tool");
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "unknown_tool", budget(200));
         let body = summary.summary.as_str().expect("summary is string");
         let head_count = body
             .lines()
@@ -1479,16 +1443,15 @@ mod tests {
         );
     }
 
-    // ── Task 1: minimum-hidden-bytes floor ──
+    // ── minimum-hidden-bytes floor ──
 
-    /// Payload that clears `generic_threshold_bytes` (so the walker would
-    /// normally elide it) but hides fewer than `min_hidden_bytes`: the
-    /// floor should disarm elision entirely and pass the whole value
-    /// through unmodified.
+    /// Payload over the elision threshold that would hide fewer than
+    /// `min_hidden_bytes`: the floor disarms elision and passes the whole
+    /// value through unmodified.
     #[test]
     fn sub_floor_payload_is_not_elided() {
-        // 10 KB over an 8 KB threshold hides ~1.8 KB — comfortably under
-        // the default 32 KB floor.
+        // 10 KB over an 8 KB threshold hides ~1.8 KB — well under the
+        // 32 KB floor.
         let s = "x".repeat(10_000);
         let qs = QueryStructure {
             root: Value::String(s.clone()),
@@ -1497,7 +1460,7 @@ mod tests {
             Arc::new(StringSummarizerChain::new()),
             &ToolCachingConfig::default(),
         );
-        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool");
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool", floor_budget());
 
         assert!(
             summary.elided_paths.is_empty(),
@@ -1508,12 +1471,11 @@ mod tests {
         assert_eq!(summary.summary, Value::String(s));
     }
 
-    /// Payload that hides more than `min_hidden_bytes` still elides
-    /// (the floor only suppresses the degenerate small-hide case).
+    /// Payload that hides more than `min_hidden_bytes` still elides — the
+    /// floor only suppresses the degenerate small-hide case.
     #[test]
     fn over_floor_payload_still_elides() {
-        // 200 KB over an 8 KB threshold hides ~192 KB — well over the
-        // default 32 KB floor.
+        // 200 KB over an 8 KB threshold hides ~192 KB.
         let s = "x".repeat(200_000);
         let qs = QueryStructure {
             root: Value::String(s),
@@ -1522,7 +1484,7 @@ mod tests {
             Arc::new(StringSummarizerChain::new()),
             &ToolCachingConfig::default(),
         );
-        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool");
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool", floor_budget());
 
         assert!(
             !summary.elided_paths.is_empty(),
@@ -1531,172 +1493,63 @@ mod tests {
         assert!(summary.shown_bytes < summary.total_bytes);
     }
 
-    /// The floor must not disarm preprocessor-backed (concourse/k8s log)
-    /// elision — that's where the mechanism earns its 98%+ saving. A
-    /// realistically-sized log hides far more than the 32 KB floor even
-    /// though the preprocessor itself (ANSI/timestamp stripping) saves
-    /// nothing on this plain-text fixture — the floor math still clears
-    /// because the walker's own line-elision dominates.
+    /// A zero floor (what a `Log`-shaped tool resolves to) elides at any
+    /// size — the case that keeps log tools summarised no matter how
+    /// small an individual log happens to be.
     #[test]
-    fn concourse_log_still_elides_under_floor() {
-        let logs = numbered_lines(10_000); // ~90 KB raw
+    fn zero_floor_elides_a_small_payload() {
+        let s = "x".repeat(10_000);
         let qs = QueryStructure {
-            root: serde_json::json!({ "logs": logs }),
+            root: Value::String(s),
         };
-        let config = ToolCachingConfig {
-            generic_threshold_bytes: 8192,
-            ..ToolCachingConfig::default()
-        };
-        let walker = Walker::new(Arc::new(StringSummarizerChain::new()), &config);
-        let summary = walker.summarize(&qs, ToolInvocationId::new(), "concourse-build-log");
+        let walker = Walker::new(
+            Arc::new(StringSummarizerChain::new()),
+            &ToolCachingConfig::default(),
+        );
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool", budget(8192));
 
         assert!(
             !summary.elided_paths.is_empty(),
-            "realistic concourse log must still elide under the default floor"
+            "a zero floor must not suppress elision"
         );
-        assert!(
-            summary.total_bytes - summary.shown_bytes >= config.min_hidden_bytes as u64,
-            "hidden bytes should clear the floor by construction"
-        );
-        assert!(
-            summary.summary.as_str().is_some(),
-            "summary body should stay the $.logs string, not the un-preprocessed root"
-        );
+        assert!(summary.shown_bytes < summary.total_bytes);
     }
 
-    /// Regression test for a real production gap: a production check
-    /// against `concourse_get_build_logs` found 23% of invocations hide
-    /// fewer than 32 KB (typical shape: ~30 KB raw eliding to ~3.5 KB
-    /// shown) — comfortably within the floor's reach, not the
-    /// "clears trivially" case the floor was designed around. Without
-    /// the preprocessor exemption, these calls would fall through to the
-    /// generic bypass and show the full *raw* log (ANSI codes and
-    /// timestamps intact) instead of the smaller, cleaned, elided
-    /// summary — regressing exactly the tools the mechanism most needs
-    /// to protect.
+    /// A preprocessed payload ignores the floor whatever the budget says.
+    /// The bypass returns the *raw* root, so taking it here would hand
+    /// back the ANSI escapes and timestamps the preprocessor just
+    /// stripped — bigger *and* dirtier than the elided summary.
     #[test]
-    fn small_concourse_log_elides_despite_being_under_the_floor() {
-        // ~3,000 short numbered lines ≈ 27 KB raw — clears the 8 KB
-        // threshold (so it still elides) but hides far less than the
-        // default 32 KB floor once elided down toward that budget.
+    fn preprocessed_payload_ignores_the_floor() {
+        // ~3,000 short numbered lines ≈ 27 KB raw: over the 8 KB
+        // threshold, but hiding well under the 32 KB floor.
         let logs = numbered_lines(3_000);
         let qs = QueryStructure {
             root: serde_json::json!({ "logs": logs }),
         };
-        let config = ToolCachingConfig {
-            generic_threshold_bytes: 8192,
-            ..ToolCachingConfig::default()
-        };
-        let walker = Walker::new(Arc::new(StringSummarizerChain::new()), &config);
-        let summary = walker.summarize(&qs, ToolInvocationId::new(), "concourse-build-log");
+        let walker = Walker::new(
+            Arc::new(StringSummarizerChain::new()),
+            &ToolCachingConfig::default(),
+        );
+        let budget = floor_budget();
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "concourse-build-log", budget);
 
         let hidden = summary.total_bytes.saturating_sub(summary.shown_bytes);
         assert!(
-            hidden < config.min_hidden_bytes as u64,
+            hidden < budget.min_hidden_bytes as u64,
             "fixture should be sized under the floor by construction; hidden={hidden}"
         );
         assert!(
             !summary.elided_paths.is_empty(),
-            "a small concourse log must still elide — preprocessor-backed tools are exempt \
-             from the floor regardless of size"
+            "a preprocessed payload must still elide under the floor"
         );
         assert!(
             summary
                 .summary
                 .as_str()
                 .is_some_and(|s| s.contains("<bulk-elided")),
-            "summary should show the cleaned, elided view, not the raw un-preprocessed root"
+            "summary should show the cleaned, elided view, not the raw root"
         );
-    }
-
-    /// Regression test for the second half of the same production gap:
-    /// k8s pod/node log tools have no preprocessor in this crate at all
-    /// (the doc's "concourse/k8s" grouping doesn't hold in code), so
-    /// `preprocessed.is_none()` alone can't protect them. A production
-    /// check found up to 47% of `*_pods_log` invocations hide fewer than
-    /// 32 KB — matched by tool name instead (`is_floor_exempt_tool`).
-    #[test]
-    fn pods_log_tool_elides_despite_being_under_the_floor() {
-        let logs = numbered_lines(3_000); // ~27 KB raw, no preprocessor
-        let qs = QueryStructure {
-            root: serde_json::json!({ "logs": logs }),
-        };
-        let config = ToolCachingConfig {
-            generic_threshold_bytes: 8192,
-            ..ToolCachingConfig::default()
-        };
-        let walker = Walker::new(Arc::new(StringSummarizerChain::new()), &config);
-        let summary = walker.summarize(
-            &qs,
-            ToolInvocationId::new(),
-            "galoy_staging_kubernetes_pods_log",
-        );
-
-        let hidden = summary.total_bytes.saturating_sub(summary.shown_bytes);
-        assert!(
-            hidden < config.min_hidden_bytes as u64,
-            "fixture should be sized under the floor by construction; hidden={hidden}"
-        );
-        assert!(
-            !summary.elided_paths.is_empty(),
-            "a *_pods_log tool must still elide under the floor even without a preprocessor"
-        );
-    }
-
-    // ── Task 3: per-tool thresholds ──
-
-    /// A per-tool `generic_threshold_bytes` override raises the budget
-    /// for that tool only — the same payload elides under the global
-    /// default but passes through under the tool-specific override.
-    #[test]
-    fn per_tool_override_raises_budget() {
-        let s = "x".repeat(20_000);
-        let mut per_tool = std::collections::HashMap::new();
-        per_tool.insert(
-            "library_get_files".to_string(),
-            crate::config::ToolCachingOverride {
-                generic_threshold_bytes: Some(65_536),
-                min_hidden_bytes: Some(0),
-            },
-        );
-        let config = ToolCachingConfig {
-            generic_threshold_bytes: 8192,
-            min_hidden_bytes: 0,
-            per_tool,
-            ..ToolCachingConfig::default()
-        };
-        let walker = Walker::new(Arc::new(StringSummarizerChain::new()), &config);
-
-        let qs = QueryStructure {
-            root: Value::String(s.clone()),
-        };
-        let default_summary = walker.summarize(&qs, ToolInvocationId::new(), "other_tool");
-        assert!(
-            !default_summary.elided_paths.is_empty(),
-            "unlisted tool keeps the global threshold and should elide"
-        );
-
-        let overridden_summary =
-            walker.summarize(&qs, ToolInvocationId::new(), "library_get_files");
-        assert!(
-            overridden_summary.elided_paths.is_empty(),
-            "overridden tool's raised threshold should avoid eliding this payload"
-        );
-        assert_eq!(overridden_summary.wire_result, Value::String(s));
-    }
-
-    /// A tool with no `per_tool` entry falls back to the global config
-    /// (no panic, no silent zero-budget).
-    #[test]
-    fn unknown_tool_falls_back_to_global() {
-        let config = ToolCachingConfig {
-            generic_threshold_bytes: 128,
-            min_hidden_bytes: 0,
-            ..ToolCachingConfig::default()
-        };
-        let walker = Walker::new(Arc::new(StringSummarizerChain::new()), &config);
-        assert_eq!(walker.threshold_for("some_unlisted_tool"), 128);
-        assert_eq!(walker.min_hidden_bytes_for("some_unlisted_tool"), 0);
     }
 
     /// Off-by-default helper: regenerates the bats `<summary>+<recovery>`
@@ -1790,9 +1643,13 @@ mod tests {
             other => other,
         };
         let chain = Arc::new(crate::summarizer_passes::default_chain());
-        let walker = Walker::new(chain, &crate::config::ToolCachingConfig::default());
+        let config = crate::config::ToolCachingConfig::default();
+        let walker = Walker::new(chain, &config);
         let qs = QueryStructure { root };
-        let summary = walker.summarize(&qs, ToolInvocationId::new(), tool_name);
+        // Fake-upstream fixtures declare no shape, matching what the bats
+        // gateway resolves for them.
+        let budget = config.budget_for(tool_name, crate::config::ToolOutputShape::Generic);
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), tool_name, budget);
         let envelope = summary.build_envelope_text();
         let uuid_re = regex::Regex::new(
             r#"invocation_id="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}""#,

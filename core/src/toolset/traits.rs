@@ -1,3 +1,4 @@
+use drua_tool_caching::ToolOutputShape;
 use rmcp::model::{CallToolResult, JsonObject, Tool};
 
 use crate::auth::AuthSubject;
@@ -54,6 +55,14 @@ pub trait TopLevelTool: Send + Sync {
         true
     }
 
+    /// What this tool's output looks like, so tool-caching can size
+    /// elision to it. Tools that dump raw logs declare
+    /// [`ToolOutputShape::Log`]; everything else is fine with the
+    /// default.
+    fn output_shape(&self) -> ToolOutputShape {
+        ToolOutputShape::default()
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -89,6 +98,14 @@ pub trait SearchableToolSet: Send + Sync {
     /// `Some(..)` for dynamically-registered toolsets (e.g. tunnels).
     fn scope(&self) -> Option<&ToolSetScope> {
         None
+    }
+
+    /// Per-tool output shape, keyed by the set's own unprefixed tool
+    /// name. Sets that front raw-log tools (build logs, `kubectl logs`)
+    /// declare them here so tool-caching keeps summarising them at any
+    /// size; everything else is fine with the default.
+    fn output_shape(&self, _tool_name: &str) -> ToolOutputShape {
+        ToolOutputShape::default()
     }
 
     async fn call(

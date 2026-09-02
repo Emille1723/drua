@@ -8,7 +8,7 @@ mod string_summarizer;
 mod summarizer_passes;
 mod walker;
 
-pub use config::ToolCachingConfig;
+pub use config::{ElisionBudget, ToolCachingConfig, ToolCachingOverride, ToolOutputShape};
 pub use error::ToolCachingError;
 pub use fetch::{ensure_object, fetch_text_for_raw, FetchQuery, FetchResult};
 pub use primitives::{
@@ -92,6 +92,7 @@ impl ToolCaching {
         tool_name: &str,
         args: &serde_json::Value,
         result: CallToolResult,
+        shape: ToolOutputShape,
     ) -> Result<ToolCacheResponse, ToolCachingError> {
         let result = ensure_text_channel(result);
         let Some(owner_id) = owner.into() else {
@@ -102,7 +103,7 @@ impl ToolCaching {
         }
 
         let processed = self
-            .process(owner_id, tool_name, args, &result, ProcessMode::Wrap)
+            .process(owner_id, tool_name, args, &result, ProcessMode::Wrap, shape)
             .await?;
 
         if !processed.persisted {
@@ -155,6 +156,7 @@ impl ToolCaching {
         tool_name: &str,
         args: &serde_json::Value,
         result: CallToolResult,
+        shape: ToolOutputShape,
     ) -> Result<ToolCacheResponse, ToolCachingError> {
         let result = ensure_text_channel(result);
         let Some(owner_id) = owner.into() else {
@@ -165,7 +167,14 @@ impl ToolCaching {
         }
 
         let processed = self
-            .process(owner_id, tool_name, args, &result, ProcessMode::Envelope)
+            .process(
+                owner_id,
+                tool_name,
+                args,
+                &result,
+                ProcessMode::Envelope,
+                shape,
+            )
             .await?;
 
         if !processed.persisted {
@@ -213,6 +222,7 @@ impl ToolCaching {
         tool_name: &str,
         args: &serde_json::Value,
         result: CallToolResult,
+        shape: ToolOutputShape,
     ) -> Result<ToolCacheResponse, ToolCachingError> {
         let result = ensure_text_channel(result);
         let Some(owner_id) = owner.into() else {
@@ -228,7 +238,7 @@ impl ToolCaching {
         // can't run from compose), so the summary replay mode mirrors
         // `cache()`'s `{result: T}` envelope.
         let processed = self
-            .process(owner_id, tool_name, args, &result, ProcessMode::Wrap)
+            .process(owner_id, tool_name, args, &result, ProcessMode::Wrap, shape)
             .await?;
 
         // For compose JS engine: always emit T verbatim, regardless of
@@ -304,6 +314,7 @@ impl ToolCaching {
         args: &serde_json::Value,
         result: &CallToolResult,
         mode: ProcessMode,
+        shape: ToolOutputShape,
     ) -> Result<Processed, ToolCachingError> {
         let original_structured = result.structured_content.clone();
         let upstream_t = tool_result_value(result);
@@ -322,9 +333,10 @@ impl ToolCaching {
             root: upstream_t.clone(),
         };
         let invocation_id = ToolInvocationId::new();
+        let budget = self.config.budget_for(tool_name, shape);
         let mut summary = self
             .walker
-            .summarize(&query_structure, invocation_id, tool_name);
+            .summarize(&query_structure, invocation_id, tool_name, budget);
         summary.envelope_mode = matches!(mode, ProcessMode::Envelope);
 
         if summary.elided_paths.is_empty() {
