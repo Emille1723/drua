@@ -8,6 +8,10 @@ use drua_tool_caching::{
 fn multi_line_string_uses_line_mode() {
     let config = ToolCachingConfig {
         generic_threshold_bytes: 256,
+        // This test exercises line-mode elision shape, not the
+        // min-hidden-bytes floor — disable it so the small fixture
+        // still elides as before.
+        min_hidden_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let walker = Walker::new(std::sync::Arc::new(StringSummarizerChain::new()), &config);
@@ -46,6 +50,10 @@ fn multi_line_string_uses_line_mode() {
 fn single_line_string_falls_back_to_byte_mode() {
     let config = ToolCachingConfig {
         generic_threshold_bytes: 1024,
+        // This test exercises byte-mode elision shape, not the
+        // min-hidden-bytes floor — disable it so the small fixture
+        // still elides as before.
+        min_hidden_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let walker = Walker::new(std::sync::Arc::new(StringSummarizerChain::new()), &config);

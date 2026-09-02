@@ -32,6 +32,11 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
     // all three regions present) wouldn't fire.
     let config = ToolCachingConfig {
         generic_threshold_bytes: 512,
+        // This test exercises the byte-mode envelope shape, not the
+        // min-hidden-bytes floor — disable it so a modest 1 KB payload
+        // still elides as before (see
+        // `sub_floor_payload_yields_no_envelope_and_no_persistence`).
+        min_hidden_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -201,6 +206,9 @@ async fn sub_threshold_input_is_passthrough_with_no_envelope() {
 async fn persisted_invocation_round_trips_through_find_by_id() {
     let config = ToolCachingConfig {
         generic_threshold_bytes: 64,
+        // This test needs an actual persisted invocation to round-trip
+        // through find_by_id — disable the floor so the payload elides.
+        min_hidden_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -242,6 +250,9 @@ async fn persisted_invocation_round_trips_through_find_by_id() {
 async fn persist_mode_emits_verbatim_t_without_elided_block() {
     let config = ToolCachingConfig {
         generic_threshold_bytes: 512,
+        // Disable the floor — this test needs the payload to actually
+        // elide so it hits the persist path.
+        min_hidden_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -283,6 +294,9 @@ async fn persist_mode_emits_verbatim_t_without_elided_block() {
 async fn direct_and_compose_persistence_share_fetch_root_but_not_wire_wrapper() {
     let config = ToolCachingConfig {
         generic_threshold_bytes: 512,
+        // Disable the floor — this test needs both paths to actually
+        // persist so it can round-trip a fetch afterwards.
+        min_hidden_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -339,6 +353,50 @@ async fn direct_and_compose_persistence_share_fetch_root_but_not_wire_wrapper() 
         fetched.structured,
         serde_json::json!({"items": ["item-198", "item-199"]})
     );
+}
+
+/// Task 1 acceptance criterion, exercised through the real `cache()`
+/// path (not just `Walker::summarize` directly): a payload that clears
+/// `generic_threshold_bytes` but would only hide a few hundred bytes
+/// must not elide, must not emit an envelope, and — since
+/// `ToolCaching::process` treats empty `elided_paths` as "don't persist"
+/// — must not write a `tool_invocations` row.
+#[tokio::test]
+async fn sub_floor_payload_yields_no_envelope_and_no_persistence() {
+    let config = ToolCachingConfig {
+        generic_threshold_bytes: 512,
+        // Default `min_hidden_bytes` (32 KB) is exactly what's under test.
+        ..ToolCachingConfig::default()
+    };
+    let caching = ToolCaching::new(&pool().await, config);
+
+    // 10 KB over a 512-byte threshold hides ~9.5 KB — comfortably under
+    // the default 32 KB floor.
+    let payload = "x".repeat(10_000);
+    let upstream = CallToolResult::success(vec![Content::text(payload.clone())]);
+
+    let response = caching
+        .cache(
+            ToolCallOwnerId::new(),
+            "bash",
+            &serde_json::json!({}),
+            upstream,
+        )
+        .await
+        .expect("sub-floor passthrough must not error");
+
+    assert!(
+        response.elided_paths.is_empty(),
+        "sub-floor payload must not elide"
+    );
+    assert!(
+        response.invocation_id.is_none(),
+        "empty elided_paths must not persist a tool_invocations row"
+    );
+    let text = envelope_text(&response.result);
+    assert_eq!(text, payload, "full payload should pass through verbatim");
+    assert!(!text.contains("<summary"));
+    assert!(!text.contains("<recovery"));
 }
 
 #[tokio::test]
