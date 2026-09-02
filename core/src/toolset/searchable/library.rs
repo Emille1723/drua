@@ -86,11 +86,11 @@ const MAX_GET_FILES: usize = 10;
 /// Per-file body cap in the LLM-facing `text` only; `structured_content`
 /// always carries the untruncated body so compose scripts have full
 /// access.
-const TEXT_BODY_CHARS_PER_FILE: usize = 8_000;
+const TEXT_BODY_CHARS_PER_FILE: usize = 64_000;
 /// Hard ceiling on the LLM-facing `text`. Files past this are listed by
 /// id-only with a `[truncated]` marker; the structured channel still
 /// includes them in full.
-const TEXT_TOTAL_CHARS: usize = 32_000;
+const TEXT_TOTAL_CHARS: usize = 256_000;
 const SNIPPET_CHARS: usize = 240;
 
 fn default_search_limit() -> usize {
@@ -783,7 +783,10 @@ mod tests {
 
     #[test]
     fn text_render_caps_total_and_lists_omitted_ids() {
-        let body = "x".repeat(12_000);
+        // Each body sits comfortably under the per-file cap on its own but
+        // four of them together exceed TEXT_TOTAL_CHARS, so the running
+        // total still has to omit whole files.
+        let body = "x".repeat(TEXT_TOTAL_CHARS / 3);
         let files: Vec<LibraryFileOutput> = (0..4)
             .map(|i| LibraryFileOutput {
                 id: format!("id-{i}"),
@@ -799,6 +802,59 @@ mod tests {
         let text = render_get_files_text(&files, &[], 4);
         assert!(text.contains("total response cap reached"));
         assert!(text.contains("omitted from text but present in structured_content"));
+    }
+
+    #[test]
+    fn render_get_files_text_emits_full_body_under_new_cap() {
+        // 40 KB clears the old 8 KB cap but sits well under the new 64 KB
+        // per-file cap — the doc's p90 space-file size (46,141 chars) is
+        // in the same range.
+        let body = "y".repeat(40_000);
+        let f = LibraryFileOutput {
+            id: "id1".into(),
+            r#type: LibraryFileType::SpaceFile,
+            title: "medium doc".into(),
+            body: body.clone(),
+            tags: vec![],
+            project_id: None,
+            space_slug: Some("drua-dev".into()),
+            relative_path: Some("research/doc.md".into()),
+        };
+        let text = render_get_files_text(&[f], &[], 1);
+        assert!(
+            !text.contains("body truncated in text view"),
+            "a 40 KB body should render whole under the new 64 KB cap"
+        );
+        assert!(text.contains(&body), "full body should be present verbatim");
+    }
+
+    #[test]
+    fn render_get_files_text_still_marks_oversize_body() {
+        let big_body = "z".repeat(100_000);
+        let f = LibraryFileOutput {
+            id: "id1".into(),
+            r#type: LibraryFileType::SpaceFile,
+            title: "huge doc".into(),
+            body: big_body.clone(),
+            tags: vec![],
+            project_id: None,
+            space_slug: None,
+            relative_path: None,
+        };
+        let files = vec![f];
+        let text = render_get_files_text(&files, &[], 1);
+        assert!(
+            text.chars().count() < big_body.len(),
+            "a 100 KB body should still truncate under the new 64 KB per-file cap"
+        );
+        assert!(text.contains("body truncated in text view"));
+
+        // structured_content still carries the untruncated body.
+        let v = serde_json::to_value(&files).unwrap();
+        assert_eq!(
+            v[0]["body"].as_str().unwrap().chars().count(),
+            big_body.len()
+        );
     }
 
     #[test]
