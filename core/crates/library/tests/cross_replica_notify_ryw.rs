@@ -170,14 +170,14 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
             };
 
             if
-                content != write_content.clone().into_bytes()
+                content == write_content.clone().into_bytes()
             {
-                println!("round {round}: STALE (write acked on WRITING_REPLICA; read on READING_REPLICA returned old content)");
-                stale_reads_record.push(round);
+               println!("round {round}: FRESH (read on READING_REPLICA returned what WRITING_REPLICA just wrote)");
             }
             else
             {
-               println!("round {round}: FRESH (read on READING_REPLICA returned what WRITING_REPLICA just wrote)");
+                println!("round {round}: STALE (write acked on WRITING_REPLICA; read on READING_REPLICA returned old content)");
+                stale_reads_record.push(round);
             }
         }
 
@@ -187,7 +187,7 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     // Observe any stale rounds
     // so far the race won is non-deterministic: it will lose but not guaranteed all of the time
     // from the context of repro'ing the script to capture the bug in code: all of the rounds will not fail to read the write
-    assert!(stale_reads_record.len() <= 0, "READ-YOUR-WRITE VIOLATED: {}/{} rounds served stale reads.\nStale reads found for the following rounds: {:?}", stale_reads_record.len(), (round_cap - 1), stale_reads_record);
+    assert!(stale_reads_record.is_empty(), "READ-YOUR-WRITE VIOLATED: {}/{} rounds served stale reads.\nStale reads found for the following rounds: {:?}", stale_reads_record.len(), (round_cap - 1), stale_reads_record);
 
     println!("read-your-write held in all {} rounds.", (round_cap - 1));
 }
