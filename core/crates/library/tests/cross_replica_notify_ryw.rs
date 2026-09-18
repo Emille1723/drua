@@ -113,7 +113,7 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
         let previous_content = format!("{content_base}{prev_round}");
         let mut read_replica_catchup_counter = 0;
 
-        println!("Catching up the reading replica before comparison within the rounds");
+        println!("Catching up the reading replica before comparison within the current round");
         loop {
             read_replica_catchup_counter+=1;
 
