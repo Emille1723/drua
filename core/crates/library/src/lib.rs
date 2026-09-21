@@ -8,6 +8,7 @@ pub mod primitives;
 mod search;
 pub mod space;
 mod synced;
+mod head_token;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -71,6 +72,12 @@ impl Library {
             )
             .await?,
         );
+
+        // trigger the event listener
+        // adhoc
+        // I don't like passing the entire git engine
+        git.head_token.start_listeners(Arc::clone(&git)).await;
+        println!("STARTUP: listener task created");
 
         let search = SearchStore::new(pool, Arc::clone(&embedder));
         let spaces = Spaces::new(&git, pool);

@@ -12,4 +12,6 @@ pub enum LibraryError {
     Job(#[from] job::error::JobError),
     #[error("sqlx: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("space event: {0}")]
+    SpaceEvent(String)
 }

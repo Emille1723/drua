@@ -55,6 +55,7 @@ async fn init_replica(
 // Test across rounds as the script (read-your-write-repro.sh) does:
 // - Consider catching up the reader before comparison occurs on the current round
 // - Prevent test round op until the reading_replica file read is caught up to the previous round's expected content
+// - Reading replica read catchup inbetween testing rounds has been since removed
 // - Capture when a stale read occurs
 // - Assert that no stale reads should be found across the testing rounds
 
@@ -73,16 +74,17 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     // library.write job; B has no poller and a disabled ticker, so it
     // can only converge via the `library_head_changed` PG NOTIFY.
     let repo_url = fixture.path().to_string_lossy().to_string();
-    let (writing_replica, writing_replica_jobs) = init_replica(test_name, "writing_replica", &repo_url, &pool, true).await;
+    let (writing_replica, writing_replica_jobs) = init_replica(test_name, "writing_replica", &repo_url, &pool, false).await;
     let (reading_replica, reading_replica_jobs) = init_replica(test_name, "reading_replica", &repo_url, &pool, false).await;
 
     let slug = "notify";
     let path = format!("spaces/{slug}/doc.md");
     let content_base = "test-round-";
     let doc_rel_path = "doc.md";
-    // Consider catching up the reading replica between rounds
-    let base_round = 0;
+    let base_round = 1;
     let round_cap = 6;
+    let total_rounds = round_cap - base_round;
+    let mut rounds_passed = 0;
 
     // create space
     writing_replica
@@ -101,50 +103,16 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
             CommitAttribution::library_default(),
         )
         .await
-        .expect("write");
+        .expect("initial write");
 
     let mut stale_reads_record: Vec<i32> = Vec::new();
 
-    for round in (base_round + 1)..round_cap
+    for round in base_round..round_cap
     {
-        // did some testing with the reading_replica catchup disabled
-        // higher chance of all rounds failing with the reading_replica catchup disabled (obviously)
-        let prev_round = round - 1;
-        let previous_content = format!("{content_base}{prev_round}");
-        let mut read_replica_catchup_counter = 0;
-
-        println!("Catching up the reading replica before comparison within the current round");
-        loop {
-            read_replica_catchup_counter+=1;
-
-            if let Ok(Some(read_content)) = reading_replica.read_blob_at_head(&path).await {
-                // match String::from_utf8(read_content.clone()) {
-                //     Ok(string) => {
-                //         println!("Content: {string}");
-                //         println!("Previous Content: {previous_content}");
-                //     },
-                //     Err(err) => { eprintln!("An error occurred whilst attempting to read the file\n{}", err) }
-                // };
-
-                let prev_content = previous_content.clone().into_bytes();
-                // bytes view
-                // println!("Prev: {:?}", prev_content);
-                // println!("Content: {:?}", read_content);
-
-                if
-                    read_content == prev_content
-                {
-                    println!("READING_REPLICA caught up @ attempt: {read_replica_catchup_counter}");
-                    break;
-                }
-            }
-
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
+        println!("\n");
         let write_content = format!("{content_base}{round}");
 
-        // Write & Ack
+        // Write
         writing_replica
             .spaces()
             .write_file(
@@ -157,27 +125,43 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
             .expect("write");
 
         // Read & comparison
-        if let Ok(Some(content)) = reading_replica.read_blob_at_head(&path).await {
-            println!("Comparison Window");
-            match
-                String::from_utf8(content.clone())
-            {
-                Ok(content_as_string) => {
-                    println!("Expected Content: {}", write_content);
-                    println!("Retrieved Content: {}", content_as_string);
-                },
-                Err(err) => { eprintln!("An error occurred whilst attempting to read the file\n{}", err) }
-            };
+        // assessment advises to  consider: space().read_file()
+        match reading_replica.spaces().read_file(slug, doc_rel_path).await {
+        // match reading_replica.read_blob_at_head(&path).await {
+            Ok(Some(content)) => {
+                println!("Comparison Window");
 
-            if
-                content == write_content.clone().into_bytes()
-            {
-               println!("round {round}: FRESH (read on READING_REPLICA returned what WRITING_REPLICA just wrote)");
+                match String::from_utf8(content.clone()) {
+                    Ok(content_as_string) => {
+                        println!("Expected Content: {write_content}");
+                        println!("Retrieved Content: {content_as_string}");
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to decode retrieved content as UTF-8: {err}");
+                    }
+                }
+
+                if content == write_content.as_bytes() {
+                    rounds_passed+=1;
+                    println!(
+                        "round {round}: FRESH \
+                        (read on READING_REPLICA returned what WRITING_REPLICA just wrote)"
+                    );
+                } else {
+                    stale_reads_record.push(round);
+                    println!(
+                        "round {round}: STALE \
+                        (write acked on WRITING_REPLICA; read on READING_REPLICA returned old content)"
+                    );
+                }
             }
-            else
-            {
-                println!("round {round}: STALE (write acked on WRITING_REPLICA; read on READING_REPLICA returned old content)");
-                stale_reads_record.push(round);
+
+            Ok(None) => {
+                println!("round {round}: NO CONTENT");
+            }
+
+            Err(err) => {
+                eprintln!("round {round}: READ ERROR: {}", err);
             }
         }
 
@@ -187,7 +171,7 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     // Observe any stale rounds
     // so far the race won is non-deterministic: it will lose but not guaranteed all of the time
     // from the context of repro'ing the script to capture the bug in code: all of the rounds will not fail to read the write
-    assert!(stale_reads_record.is_empty(), "READ-YOUR-WRITE VIOLATED: {}/{} rounds served stale reads.\nStale reads found for the following rounds: {:?}", stale_reads_record.len(), (round_cap - 1), stale_reads_record);
+    assert!(rounds_passed == total_rounds, "READ-YOUR-WRITE VIOLATED: {}/{} rounds served stale reads.\nStale reads found for the following rounds: {:?}", (total_rounds - rounds_passed), total_rounds, stale_reads_record);
 
-    println!("read-your-write held in all {} rounds.", (round_cap - 1));
+    println!("read-your-write held in all {} rounds.", total_rounds);
 }

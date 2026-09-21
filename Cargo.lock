@@ -1589,15 +1589,18 @@ dependencies = [
 name = "drua-library"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "code-assistant-core",
  "derive_builder",
  "dirs",
  "es-entity",
+ "futures",
  "git2",
  "github-app",
  "job",
+ "obix",
  "pgvector",
  "serde",
  "serde_json",
