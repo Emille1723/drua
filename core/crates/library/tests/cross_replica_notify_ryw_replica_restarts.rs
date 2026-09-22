@@ -61,7 +61,7 @@ async fn init_replica(
 
 #[tokio::test]
 #[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
-async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
+async fn write_on_one_replica_is_visible_on_peer_late_start() {
     let test_name = "write_on_one_replica_is_visible_on_peer_without_ticker";
     let _ = tracing_subscriber::fmt()
         .with_env_filter("drua_library=debug,info")
@@ -75,7 +75,7 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     // can only converge via the `library_head_changed` PG NOTIFY.
     let repo_url = fixture.path().to_string_lossy().to_string();
     let (writing_replica, writing_replica_jobs) = init_replica(test_name, "writing_replica", &repo_url, &pool, false).await;
-    let (reading_replica, reading_replica_jobs) = init_replica(test_name, "reading_replica", &repo_url, &pool, false).await;
+    // let (reading_replica, reading_replica_jobs) = init_replica(test_name, "reading_replica", &repo_url, &pool, false).await;
 
     let slug = "notify";
     let path = format!("spaces/{slug}/doc.md");
@@ -114,8 +114,72 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     {
         println!("\n");
         let write_content = format!("{content_base}{round}");
+        let modded_content = format!("modded-{write_content}");
+        let modded_content_new = format!("modded-new_{write_content}");
 
         // Write
+        writing_replica
+            .spaces()
+            .write_file(
+                slug,
+                doc_rel_path,
+                modded_content.clone(),
+                CommitAttribution::library_default(),
+            )
+            .await
+            .expect("write");
+
+        match writing_replica.spaces().read_file(slug, doc_rel_path).await {
+            Ok(Some(content)) => {
+                match String::from_utf8(content.clone()) {
+                    Ok(content_as_string) => {
+                        println!("Modded Content: {content_as_string}");
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to decode retrieved content as UTF-8: {err}");
+                    }
+                }
+            },
+            Ok(None) => {
+                println!("round {round}: NO CONTENT");
+            }
+
+            Err(err) => {
+                eprintln!("round {round}: READ ERROR: {}", err);
+            }
+        }
+
+        writing_replica
+            .spaces()
+            .write_file(
+                slug,
+                doc_rel_path,
+                modded_content_new.clone(),
+                CommitAttribution::library_default(),
+            )
+            .await
+            .expect("write");
+
+        match writing_replica.spaces().read_file(slug, doc_rel_path).await {
+            Ok(Some(content)) => {
+                match String::from_utf8(content.clone()) {
+                    Ok(content_as_string) => {
+                        println!("Modded Content New: {content_as_string}");
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to decode retrieved content as UTF-8: {err}");
+                    }
+                }
+            },
+            Ok(None) => {
+                println!("round {round}: NO CONTENT");
+            }
+
+            Err(err) => {
+                eprintln!("round {round}: READ ERROR: {}", err);
+            }
+        }
+
         writing_replica
             .spaces()
             .write_file(
@@ -129,6 +193,8 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
 
         // Read & comparison
         // assessment advises to  consider: space().read_file()
+        // considering starting reading replica later than the events
+        let (reading_replica, reading_replica_jobs) = init_replica(test_name, "reading_replica", &repo_url, &pool, false).await;
         match reading_replica.spaces().read_file(slug, doc_rel_path).await {
         // match reading_replica.read_blob_at_head(&path).await {
             Ok(Some(content)) => {

@@ -85,9 +85,8 @@ impl Library {
         // Local Converge with event replays
         //      - convergence mechanism for events pulls upstream on a comparison where local_head < replay_event_head
         //      - all subsequent replays then can also be cheap local validation mechanism
-        // Intended invariant here:
-        //      - if local_head < replay_event_head -> pull upstream
-        //      - else -> already caught up
+        // git repo is source of truth
+        // consider events as convergence/reconciliation trigger
         match git.fetch_and_head().await {
             Ok(Some(head)) => {
                 tracing::info!("Replica start. Pull upstream. Head: {}", head);
@@ -187,7 +186,7 @@ impl Library {
                             Ok(evt) => {
                                 if let Some(SpacesEvent::HeadChanged { new_head }) = &evt.payload {
                                     tracing::info!("Event emitted: Head Changed - {}", new_head);
-                                    git.local_converge(Some(new_head.clone())).await;
+                                    let _ = git.local_converge(Some(new_head.clone())).await;
                                 }
                                 else
                                 {

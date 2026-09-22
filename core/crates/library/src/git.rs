@@ -397,7 +397,7 @@ impl GitEngine {
     /// path doesn't exist (or HEAD is unborn).
     #[tracing::instrument(name = "library.git.read_blob_at_head", skip_all, fields(%path))]
     pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
-        self.local_converge(None).await; // more recon needed to confirm if this is the best placement
+        let _ = self.local_converge(None).await; // more recon needed to confirm if this is the best placement
         let repo_path = self.repo_path.clone();
         let path = path.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, LibraryError> {
@@ -770,37 +770,28 @@ impl GitEngine {
     // Get the local head & the remote head
     // if local head >= remote head -> read
     // else -> pull upstream
-    pub async fn local_converge(&self, hash: Option<String>) {
+    pub async fn local_converge(
+        &self,
+        hash: Option<String>,
+    ) -> Result<(), LibraryError> {
         let target = match hash {
             Some(hash) => hash,
             None => loop {
-                match self.remote_head().await {
-                    Ok(Some(head)) => break head,
-                    Ok(None) => {
-                        println!("Remote HEAD doesn't exist");
-                    }
-                    Err(err) => {
-                        eprintln!("Failed to get remote HEAD: {err}");
+                match self.remote_head().await? {
+                    Some(head) => break head,
+                    None => {
+                        self.fetch_and_head().await?;
                     }
                 }
-
-                let _ = self.fetch_and_head().await;
             },
         };
 
         loop {
-            match self.contains_commit(&target).await {
-                Ok(true) => return,
-
-                Ok(false) => {
-                    let _ = self.fetch_and_head().await;
-                }
-
-                Err(err) => {
-                    eprintln!("Failed to check local commit: {err}");
-                    let _ = self.fetch_and_head().await;
-                }
+            if self.contains_commit(&target).await? {
+                return Ok(());
             }
+
+            self.fetch_and_head().await?;
         }
     }
 
