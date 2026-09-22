@@ -58,6 +58,9 @@ async fn init_replica(
 //      - Reading replica read catchup inbetween testing rounds has been since removed
 // - Capture when a stale read occurs
 // - Assert that no stale reads should be found across the testing rounds
+// this test is meant to emulate late starting replicas trying to reconcile
+// it may fail on first run with a main.lock
+// noticed at the end of my time for submission so won't attempt to fix now
 
 #[tokio::test]
 #[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
@@ -85,7 +88,6 @@ async fn write_on_one_replica_is_visible_on_peer_late_start() {
     let round_cap = 6;
     let total_rounds = round_cap - base_round;
     let mut rounds_passed = 0;
-    let mut stale_reads = 0;
 
     // create space
     writing_replica

@@ -85,7 +85,6 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     let round_cap = 6;
     let total_rounds = round_cap - base_round;
     let mut rounds_passed = 0;
-    let mut stale_reads = 0;
 
     // create space
     writing_replica
