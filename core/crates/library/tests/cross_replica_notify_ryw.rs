@@ -106,6 +106,8 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
         .expect("initial write");
 
     let mut stale_reads_record: Vec<i32> = Vec::new();
+    let mut no_content_record: Vec<i32> = Vec::new();
+    let mut read_error_record: Vec<i32> = Vec::new();
 
     for round in base_round..round_cap
     {
@@ -157,10 +159,12 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
             }
 
             Ok(None) => {
+                no_content_record.push(round);
                 println!("round {round}: NO CONTENT");
             }
 
             Err(err) => {
+                read_error_record.push(round);
                 eprintln!("round {round}: READ ERROR: {}", err);
             }
         }
@@ -171,7 +175,7 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     // Observe any stale rounds
     // so far the race won is non-deterministic: it will lose but not guaranteed all of the time
     // from the context of repro'ing the script to capture the bug in code: all of the rounds will not fail to read the write
-    assert!(rounds_passed == total_rounds, "READ-YOUR-WRITE VIOLATED: {}/{} rounds served stale reads.\nStale reads found for the following rounds: {:?}", (total_rounds - rounds_passed), total_rounds, stale_reads_record);
+    assert!(rounds_passed == total_rounds, "READ-YOUR-WRITE VIOLATED: {}/{} rounds violated.\nStale reads found for the following rounds: {:?}\nNo content found for the following rounds: {:?}\nRead error for the following rounds: {:?}", (total_rounds - rounds_passed), total_rounds, stale_reads_record, no_content_record, read_error_record);
 
     println!("read-your-write held in all {} rounds.", total_rounds);
 }

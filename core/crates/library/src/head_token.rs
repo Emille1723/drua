@@ -9,8 +9,8 @@
 // - Replicas should record their last event consumed
 // - My Intended flow (so far):
 //     - Writing Replica
-//         - Successful write triggers push. Successful push to be acked with persisted event
-//         - Published HEAD is persisted to table: 'latest_published_head'
+//         - Successful write triggers push. Successful push to be acked, then emit a persisted event
+//         - Published HEAD is persisted to table: 'latest_published_head' (no longer implementing)
 //     - Reading Replica
 //         - Event Consumption
 //             - Check if the latest published head is contained locally
@@ -37,7 +37,6 @@
 //             - Instead of (n replicas) * (n pulls from upstream)
 
 use obix::{
-    EventSequence,
     MailboxConfig,
     out::Outbox
 };
@@ -45,99 +44,44 @@ use serde::{
     Serialize,
     Deserialize
 };
-use futures::stream::StreamExt;
 use sqlx::PgPool;
 use crate::LibraryError;
-use tokio::task::JoinHandle;
-use crate::GitEngine;
-use std::sync::Arc;
 
 // define event types
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-enum SpaceEvent {
+pub enum SpacesEvent {
     HeadChanged { new_head: String },
 }
 
 type BaseLibraryResult<T> = Result<T, LibraryError>;
 
+#[derive(Clone)]
 pub struct HeadToken {
-    outbox: Outbox<SpaceEvent>
+    pub outbox: Outbox<SpacesEvent>
 }
 
 impl HeadToken {
     pub async fn init(pool: PgPool) -> BaseLibraryResult<Self> {
-        let outbox = Outbox::<SpaceEvent>::init(&pool, MailboxConfig::builder().build().expect("Couldn't build MailboxConfig")).await?;
+        let outbox = Outbox::<SpacesEvent>::init(&pool, MailboxConfig::builder().build().expect("Couldn't build MailboxConfig")).await?;
         Ok(Self {
             outbox
         })
     }
 
-    // use of obix should remove the need of the hand rolled notify/listen
-    pub async fn start_listeners(&self, git_engine: Arc<GitEngine>) -> JoinHandle<()> {
-        let mut listener = self.outbox.listen_persisted(None);
-
-        tokio::spawn(async move {
-            println!("LISTENER: started");
-
-            loop {
-                println!("LISTENER: waiting");
-
-                match listener.next().await {
-                    Some(Ok(evt)) => {
-                        println!("LISTENER: received event");
-
-                        match &evt.payload {
-                            Some(SpaceEvent::HeadChanged { new_head }) => {
-                                println!("EVENT RECEIVED: {new_head}");
-                                git_engine.local_converge(Some(new_head.clone())).await;
-                            }
-                            None => {
-                                println!("LISTENER: event had no payload");
-                            }
-                        }
-                    }
-
-                    Some(Err(err)) => {
-                        eprintln!("LISTENER ERROR: {err}");
-                    }
-
-                    None => {
-                        eprintln!("LISTENER: stream ended");
-                        break;
-                    }
-                }
-            }
-        })
-    }
-
-    // Update the current remote head and emit the event for replicas to consume & converge
-    pub async fn update_published_head() { }
-
     pub async fn publish_persisted_head(
         &self,
         head_token_hash: String,
     ) -> anyhow::Result<()> {
-        println!("PUB: begin {head_token_hash}");
-
         let mut op = self.outbox.begin_op().await?;
-
-        println!("PUB: publishing {head_token_hash}");
-
         self.outbox
             .publish_persisted_in_op(
                 &mut op,
-                SpaceEvent::HeadChanged {
+                SpacesEvent::HeadChanged {
                     new_head: head_token_hash.clone(),
                 },
             )
             .await?;
-
-        println!("PUB: committing {head_token_hash}");
-
         op.commit().await?;
-
-        println!("PUB: committed {head_token_hash}");
-
         Ok(())
     }
 }

@@ -24,13 +24,6 @@ const QUEUE_CAPACITY: usize = 256;
 /// library repo's `main`. Fixed (one library repo per deployment); `0x647275616c6962` = "drualib".
 const LIBRARY_PUSH_LOCK_KEY: i64 = 0x647275616c6962;
 
-/// PG NOTIFY channel fired after a successful push. Every replica's
-/// fetcher LISTENs on it, so a write on one replica is visible
-/// cluster-wide in milliseconds instead of after each replica's fetch
-/// ticker (`fetch_interval_ms`). Payload is empty; the wake-up is
-/// purely a hint, the ticker remains the backstop.
-const LIBRARY_HEAD_NOTIFY_CHANNEL: &str = "library_head_changed";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaKind {
     Added,
@@ -134,13 +127,9 @@ pub struct GitEngine {
     /// in-flight commits before `push_main` lands.
     repo_mutex: Arc<Mutex<()>>,
     write_tx: mpsc::Sender<QueuedOp>,
-    /// Wakes the fetcher. Fired by the local writer after a successful
-    /// batch and by the head listener on any peer replica's push.
-    commit_notify: Arc<Notify>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
     _writer: OwnedTaskHandle,
-    pub head_token: Arc<HeadToken>,
-    pub in_fetch: Arc<bool>
+    head_token: HeadToken,
 }
 
 impl GitEngine {
@@ -150,16 +139,13 @@ impl GitEngine {
         &self.repo_path
     }
 
-    pub fn commit_notify(&self) -> Arc<Notify> {
-        Arc::clone(&self.commit_notify)
-    }
-
     #[tracing::instrument(name = "library.git.init", skip_all)]
     pub async fn init(
         repo_url: &str,
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
         pool: PgPool,
+        head_token: HeadToken
     ) -> Result<Self, LibraryError> {
         if repo_url.is_empty() {
             return Err(LibraryError::Config("repo_url is empty".into()));
@@ -176,14 +162,11 @@ impl GitEngine {
 
         let repo_mutex = Arc::new(Mutex::new(()));
         let (write_tx, write_rx) = mpsc::channel(QUEUE_CAPACITY);
-        let commit_notify = Arc::new(Notify::new());
-        let head_tkn = Arc::new(HeadToken::init(pool.clone()).await?);
         let writer = tokio::spawn(Self::run_writer(
-            Arc::clone(&head_tkn),
+            head_token.clone(),
             repo_path.clone(),
             github_app.clone(),
             Arc::clone(&repo_mutex),
-            Arc::clone(&commit_notify),
             write_rx,
             pool.clone(),
         ));
@@ -192,45 +175,12 @@ impl GitEngine {
             repo_path,
             repo_mutex,
             write_tx,
-            commit_notify,
             github_app,
             _writer: OwnedTaskHandle::new(writer),
-            head_token: Arc::clone(&head_tkn),
-            in_fetch: Arc::new(false)
+            head_token
         };
 
         Ok(this)
-    }
-
-    /// Cluster-wide counterpart of the writer's local wake-up: any
-    /// replica's successful push `pg_notify`s [`LIBRARY_HEAD_NOTIFY_CHANNEL`],
-    /// waking this replica's fetcher immediately. While PG is
-    /// unreachable, sync degrades to ticker cadence.
-    async fn run_head_listener(pool: PgPool, commit_notify: Arc<Notify>) {
-        loop {
-            let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::warn!(error = %e, "library head listener: connect failed; retrying");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-            if let Err(e) = listener.listen(LIBRARY_HEAD_NOTIFY_CHANNEL).await {
-                tracing::warn!(error = %e, "library head listener: LISTEN failed; retrying");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-            loop {
-                match listener.recv().await {
-                    Ok(_) => commit_notify.notify_one(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "library head listener: recv failed; reconnecting");
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     /// Diff between two commits (None `from` = walk all of `to`'s tree as Added)
@@ -814,59 +764,41 @@ impl GitEngine {
     }
 
     // replica converge handler
-    // accepts the commit on event consumption: SpaceEvent::HeadChanged
+    // testing so far indicates that there can be a race between the event consumption & reads
+    // initially I wanted to store the last consumed event's head as a source of truth for read conciliation
+    // but given the aforementioned race, I'll fallback to the git repo as the source of truth
+    // Get the local head & the remote head
+    // if local head >= remote head -> read
+    // else -> pull upstream
     pub async fn local_converge(&self, hash: Option<String>) {
-        // todo: clean up flow
-        loop {
-            match
-                hash.clone()
-            {
-                Some(hash) => {
-                        match
-                            self.contains_commit(&hash).await
-                        {
-                            Ok(true) => {
-                                return;
-                            },
-                            Ok(false) => {
-                                let _ = self.fetch_and_head().await;
-                                continue;
-                            }
-                            Err(_) => {}
-                        }
-                },
-                None => {
-                    // fetch remote head
-                    // and compare
-                    // intended implementation is to a single row table
-                    // consider that this current impl opens up too many queries to the repo when considering a cluster of n replicas
-                    match self.remote_head().await {
-                        Ok(Some(head)) => {
-                            println!("Remote HEAD: {}", head);
-                            match
-                                self.contains_commit(&head).await
-                            {
-                                Ok(true) => {
-                                    return;
-                                },
-                                Ok(false) => {
-                                    // let repo_path = self.repo_path.display();
-                                    // let repo = format!("{}", repo_path);
-                                    let _ = self.fetch_and_head().await;
-                                    continue;
-                                }
-                                Err(_) => {}
-                            }
-                        }
-                        Ok(None) => {
-                            println!("Remote HEAD doesn't exist");
-                        }
-                        Err(err) => {
-                            eprintln!("Failed to get remote HEAD: {err}");
-                        }
+        let target = match hash {
+            Some(hash) => hash,
+            None => loop {
+                match self.remote_head().await {
+                    Ok(Some(head)) => break head,
+                    Ok(None) => {
+                        println!("Remote HEAD doesn't exist");
                     }
+                    Err(err) => {
+                        eprintln!("Failed to get remote HEAD: {err}");
+                    }
+                }
+
+                let _ = self.fetch_and_head().await;
+            },
+        };
+
+        loop {
+            match self.contains_commit(&target).await {
+                Ok(true) => return,
+
+                Ok(false) => {
                     let _ = self.fetch_and_head().await;
-                    continue;
+                }
+
+                Err(err) => {
+                    eprintln!("Failed to check local commit: {err}");
+                    let _ = self.fetch_and_head().await;
                 }
             }
         }
@@ -876,11 +808,10 @@ impl GitEngine {
     /// [`BATCH_WINDOW`] for siblings, then runs the whole batch as
     /// N commits + 1 push under the [`Self::repo_mutex`].
     async fn run_writer(
-        head_token: Arc<HeadToken>,
+        head_token: HeadToken,
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
         repo_mutex: Arc<Mutex<()>>,
-        commit_notify: Arc<Notify>,
         mut rx: mpsc::Receiver<QueuedOp>,
         pool: PgPool,
     ) {
@@ -899,38 +830,7 @@ impl GitEngine {
                     Err(_) => break,    // window elapsed
                 }
             }
-            let any_ok =
-                Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch)
-                    .await;
-
-            if any_ok
-            {
-                let head = Self::head(repo_path.clone(), repo_mutex.clone())
-                    .await
-                    .map(|head| head.unwrap_or_default())
-                    .map_err(|_| LibraryError::Git(("Unable to get LOCAL HEAD").into()));
-
-                match
-                    head
-                {
-                    Ok(local_head) => {
-                        println!("Local Head post push: {}", local_head);
-
-                        if
-                            let Err(err) = head_token.publish_persisted_head(local_head.clone()).await
-                        {
-                            LibraryError::SpaceEvent(("Unable to emit the SpaceEvent::HeadChanged").into());
-                        }
-                        else
-                        {
-                            println!("Event published. Local Head: {}", local_head.clone());
-                        }
-                    },
-                    Err(err) => {
-                        eprintln!("Unable to get local HEAD: {err}");
-                    }
-                }
-            }
+            Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch, head_token.clone()).await;
         }
     }
 
@@ -941,7 +841,8 @@ impl GitEngine {
         repo_mutex: &Mutex<()>,
         pool: &PgPool,
         batch: Vec<QueuedOp>,
-    ) -> bool {
+        head_token: HeadToken
+    ) {
         let _guard = repo_mutex.lock().await;
         // Cluster-wide push serialization (HA): the per-pod `repo_mutex` only
         // orders writes within a pod; this advisory lock ensures at most one
@@ -977,21 +878,33 @@ impl GitEngine {
         let (ops, responders): (Vec<BatchOp>, Vec<oneshot::Sender<Result<(), LibraryError>>>) =
             batch.into_iter().map(|q| (q.op, q.response)).unzip();
 
-        let results = tokio::task::spawn_blocking(move || -> Vec<Result<(), LibraryError>> {
+        let (results, local_head) = tokio::task::spawn_blocking(move || -> (Vec<Result<(), LibraryError>>, Option<String>) {
             Self::commit_each_then_push_blocking(&path, ops, token.as_deref())
         })
         .await
         .unwrap_or_else(|e| {
             let msg = format!("commit_each_then_push join: {e}");
-            (0..n)
-                .map(|_| Err(LibraryError::Git(msg.clone())))
-                .collect()
+                ((0..n)
+                    .map(|_| Err(LibraryError::Git(msg.clone())))
+                    .collect(),
+                None)
         });
 
         let any_ok = results.iter().any(|r| r.is_ok());
-        // if any_ok {
-        //     Self::notify_cluster_push(pool, lock_conn.as_deref_mut()).await;
-        // }
+        if any_ok {
+            // emit event if pushes exist
+            if let Some(new_local_head) = local_head {
+                if
+                    let Err(_err) = head_token.publish_persisted_head(new_local_head.clone()).await
+                {
+                    tracing::error!("Unable to emit the event for the recent: commit_each_then_push_blocking: {}", _err);
+                }
+                else
+                {
+                    tracing::info!("Event published. Local Head: {}", new_local_head.clone());
+                }
+            }
+        }
 
         if let Some(mut conn) = lock_conn.take() {
             if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
@@ -1005,30 +918,6 @@ impl GitEngine {
         for (resp, res) in responders.into_iter().zip(results) {
             let _ = resp.send(res);
         }
-        any_ok
-    }
-
-    /// Wake peer replicas' fetchers after a successful push so
-    /// cross-replica reads converge in milliseconds instead of after
-    /// each replica's fetch ticker. Best effort: failure degrades to
-    /// ticker-cadence convergence. Prefers the advisory-lock connection
-    /// (already held) over a fresh pool checkout.
-    async fn notify_cluster_push(pool: &PgPool, lock_conn: Option<&mut PgConnection>) {
-        let res = match lock_conn {
-            Some(conn) => sqlx::query("SELECT pg_notify($1, '')")
-                .bind(LIBRARY_HEAD_NOTIFY_CHANNEL)
-                .execute(conn)
-                .await
-                .map(|_| ()),
-            None => sqlx::query("SELECT pg_notify($1, '')")
-                .bind(LIBRARY_HEAD_NOTIFY_CHANNEL)
-                .execute(pool)
-                .await
-                .map(|_| ()),
-        };
-        if let Err(e) = res {
-            tracing::warn!(error = %e, "library head notify failed; peers converge on ticker");
-        }
     }
 
     /// Apply N ops as N commits, then push once. On non-FF push, fetch
@@ -1038,22 +927,24 @@ impl GitEngine {
     /// op that committed locally so the caller can mark them as
     /// cascaded. Per-op `Validation` errors don't advance HEAD — the
     /// next op layers on the previous successful commit.
+    // Return the HEAD upon a successful commit
+    // Now return if there were any successful pushes + The new associated commit HEAD
     fn commit_each_then_push_blocking(
         repo_path: &Path,
         ops: Vec<BatchOp>,
         token: Option<&str>,
-    ) -> Vec<Result<(), LibraryError>> {
+    ) -> (Vec<Result<(), LibraryError>>, Option<String>) {
         if ops.is_empty() {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         let repo = match git2::Repository::open_bare(repo_path) {
             Ok(r) => r,
             Err(e) => {
                 let msg = format!("open bare: {e}");
-                return ops
+                return (ops
                     .iter()
                     .map(|_| Err(LibraryError::Git(msg.clone())))
-                    .collect();
+                    .collect(), None);
             }
         };
 
@@ -1062,10 +953,10 @@ impl GitEngine {
             Ok(c) => c.id(),
             Err(e) => {
                 let msg = format!("head: {e}");
-                return ops
+                return (ops
                     .iter()
                     .map(|_| Err(LibraryError::Git(msg.clone())))
-                    .collect();
+                    .collect(), None);
             }
         };
         let mut attempt: u32 = 0;
@@ -1075,10 +966,10 @@ impl GitEngine {
                 Ok(c) => c.id(),
                 Err(e) => {
                     let msg = format!("head: {e}");
-                    return ops
+                    return (ops
                         .iter()
                         .map(|_| Err(LibraryError::Git(msg.clone())))
-                        .collect();
+                        .collect(), None);
                 }
             };
             let mut current_parent_oid = parent_oid_at_attempt_start;
@@ -1094,12 +985,14 @@ impl GitEngine {
                 }
             }
 
+            tracing::info!("{} | {}", parent_oid_at_attempt_start.to_string(), current_parent_oid.to_string());
+
             if current_parent_oid == parent_oid_at_attempt_start {
-                return per_op;
+                return (per_op, None);
             }
 
             match Self::push_main(&repo, token) {
-                Ok(()) => return per_op,
+                Ok(()) => return (per_op, Some(current_parent_oid.to_string())),
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::info!(
                         error = %e, attempt,
@@ -1107,17 +1000,17 @@ impl GitEngine {
                     );
                     if let Err(fe) = Self::fetch_origin(&repo, token) {
                         let msg = fe.to_string();
-                        return ops
+                        return (ops
                             .iter()
                             .map(|_| Err(LibraryError::Git(msg.clone())))
-                            .collect();
+                            .collect(), None);
                     }
                     if let Err(re) = Self::reset_main_to_origin(&repo) {
                         let msg = re.to_string();
-                        return ops
+                        return (ops
                             .iter()
                             .map(|_| Err(LibraryError::Git(msg.clone())))
-                            .collect();
+                            .collect(), None);
                     }
                 }
                 Err(e) => {
@@ -1128,13 +1021,13 @@ impl GitEngine {
                         "rollback after push failure",
                     );
                     let msg = format!("push failed: {e}");
-                    return per_op
+                    return (per_op
                         .into_iter()
                         .map(|r| match r {
                             Ok(()) => Err(LibraryError::Git(msg.clone())),
                             Err(e) => Err(e),
                         })
-                        .collect();
+                        .collect(), None);
                 }
             }
         }

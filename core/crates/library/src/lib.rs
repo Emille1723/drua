@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use tokio::sync::mpsc;
 
 pub use attribution::{CommitAttribution, CommitSubjectKind};
@@ -26,6 +27,7 @@ pub use primitives::SpaceId;
 pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE};
 pub use synced::LibrarySynced;
+pub use crate::head_token::{HeadToken, SpacesEvent};
 
 pub use self::git::DirEntry;
 use self::git::GitEngine;
@@ -63,21 +65,38 @@ impl Library {
         github_app: Option<Arc<GitHubAppTokenProvider>>,
     ) -> Result<Self, LibraryError> {
         let repo_path = PathBuf::from(&config.data_dir);
+        let head_token = HeadToken::init(pool.clone()).await?;
         let git = Arc::new(
             GitEngine::init(
                 &config.repo_url,
                 repo_path,
                 github_app.clone(),
                 pool.clone(),
+                head_token.clone()
             )
             .await?,
         );
 
-        // trigger the event listener
-        // adhoc
-        // I don't like passing the entire git engine
-        git.head_token.start_listeners(Arc::clone(&git)).await;
-        println!("STARTUP: listener task created");
+        // consider pull upstream on start/restart
+        // git repo remains the source of truth (consider stale catchup with event replays as source of truth only)
+        // this can go both ways
+        // Pull upstream at startup followed by event replay
+        //      - event replays on restart are now a cheap local validation mechanism
+        // Local Converge with event replays
+        //      - convergence mechanism for events pulls upstream on a comparison where local_head < replay_event_head
+        //      - all subsequent replays then can also be cheap local validation mechanism
+        // Intended invariant here:
+        //      - if local_head < replay_event_head -> pull upstream
+        //      - else -> already caught up
+        match git.fetch_and_head().await {
+            Ok(Some(head)) => {
+                tracing::info!("Replica start. Pull upstream. Head: {}", head);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Replica start. Pull upstream failed");
+            }
+        }
 
         let search = SearchStore::new(pool, Arc::clone(&embedder));
         let spaces = Spaces::new(&git, pool);
@@ -106,7 +125,7 @@ impl Library {
             Arc::clone(&git),
             tick_tx,
             Duration::from_millis(config.fetch_interval_ms),
-            git.commit_notify(),
+            head_token.clone(),
         );
 
         let spawner = jobs.add_resident_initializer(LibrarySyncJobInitializer::new(
@@ -153,30 +172,32 @@ impl Library {
         git: Arc<GitEngine>,
         tick_tx: mpsc::Sender<CommitTick>,
         interval: Duration,
-        commit_notify: Arc<tokio::sync::Notify>,
+        head_token: HeadToken
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_head: Option<String> = None;
+            let mut head_token_listener = head_token.outbox.listen_persisted(None);
             loop {
                 tokio::select! {
-                    _ = ticker.tick() => {}
-                    _ = commit_notify.notified() => {}
-                }
-                match git.fetch_and_head().await {
-                    Ok(Some(head)) => {
-                        if last_head.as_deref() == Some(head.as_str()) {
-                            continue;
+                    _ = ticker.tick() => {},
+                    Some(event) = head_token_listener.next() => {
+                        match
+                            event
+                        {
+                            Ok(evt) => {
+                                if let Some(SpacesEvent::HeadChanged { new_head }) = &evt.payload {
+                                    tracing::info!("Event emitted: Head Changed - {}", new_head);
+                                    git.local_converge(Some(new_head.clone())).await;
+                                }
+                                else
+                                {
+                                    tracing::warn!("No Head received");
+                                }
+                            },
+                            Err(_err) => {
+                                dbg!(_err);
+                            }
                         }
-                        last_head = Some(head.clone());
-                        if tick_tx.send(CommitTick { head }).await.is_err() {
-                            return;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "library fetcher: fetch failed");
                     }
                 }
             }
