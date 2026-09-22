@@ -9,6 +9,8 @@ use tokio::task::JoinHandle;
 use crate::attribution::CommitAttribution;
 use crate::importer::GitFileHash;
 use crate::{GitHubAppTokenProvider, LibraryError};
+use crate::head_token::HeadToken;
+use git2::{Oid, Repository};
 
 /// How long the writer waits for additional ops after the first one
 /// arrives before processing the batch. Sized to absorb the jitter of
@@ -21,13 +23,6 @@ const QUEUE_CAPACITY: usize = 256;
 /// Cluster-wide Postgres advisory-lock key for serializing pushes to the
 /// library repo's `main`. Fixed (one library repo per deployment); `0x647275616c6962` = "drualib".
 const LIBRARY_PUSH_LOCK_KEY: i64 = 0x647275616c6962;
-
-/// PG NOTIFY channel fired after a successful push. Every replica's
-/// fetcher LISTENs on it, so a write on one replica is visible
-/// cluster-wide in milliseconds instead of after each replica's fetch
-/// ticker (`fetch_interval_ms`). Payload is empty; the wake-up is
-/// purely a hint, the ticker remains the backstop.
-const LIBRARY_HEAD_NOTIFY_CHANNEL: &str = "library_head_changed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaKind {
@@ -132,12 +127,9 @@ pub struct GitEngine {
     /// in-flight commits before `push_main` lands.
     repo_mutex: Arc<Mutex<()>>,
     write_tx: mpsc::Sender<QueuedOp>,
-    /// Wakes the fetcher. Fired by the local writer after a successful
-    /// batch and by the head listener on any peer replica's push.
-    commit_notify: Arc<Notify>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
     _writer: OwnedTaskHandle,
-    _listener: OwnedTaskHandle,
+    head_token: HeadToken,
 }
 
 impl GitEngine {
@@ -147,16 +139,13 @@ impl GitEngine {
         &self.repo_path
     }
 
-    pub fn commit_notify(&self) -> Arc<Notify> {
-        Arc::clone(&self.commit_notify)
-    }
-
     #[tracing::instrument(name = "library.git.init", skip_all)]
     pub async fn init(
         repo_url: &str,
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
         pool: PgPool,
+        head_token: HeadToken
     ) -> Result<Self, LibraryError> {
         if repo_url.is_empty() {
             return Err(LibraryError::Config("repo_url is empty".into()));
@@ -173,57 +162,25 @@ impl GitEngine {
 
         let repo_mutex = Arc::new(Mutex::new(()));
         let (write_tx, write_rx) = mpsc::channel(QUEUE_CAPACITY);
-        let commit_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(Self::run_writer(
+            head_token.clone(),
             repo_path.clone(),
             github_app.clone(),
             Arc::clone(&repo_mutex),
-            Arc::clone(&commit_notify),
             write_rx,
             pool.clone(),
         ));
-        let listener = tokio::spawn(Self::run_head_listener(pool, Arc::clone(&commit_notify)));
 
-        Ok(Self {
+        let this = Self {
             repo_path,
             repo_mutex,
             write_tx,
-            commit_notify,
             github_app,
             _writer: OwnedTaskHandle::new(writer),
-            _listener: OwnedTaskHandle::new(listener),
-        })
-    }
+            head_token
+        };
 
-    /// Cluster-wide counterpart of the writer's local wake-up: any
-    /// replica's successful push `pg_notify`s [`LIBRARY_HEAD_NOTIFY_CHANNEL`],
-    /// waking this replica's fetcher immediately. While PG is
-    /// unreachable, sync degrades to ticker cadence.
-    async fn run_head_listener(pool: PgPool, commit_notify: Arc<Notify>) {
-        loop {
-            let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::warn!(error = %e, "library head listener: connect failed; retrying");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-            if let Err(e) = listener.listen(LIBRARY_HEAD_NOTIFY_CHANNEL).await {
-                tracing::warn!(error = %e, "library head listener: LISTEN failed; retrying");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-            loop {
-                match listener.recv().await {
-                    Ok(_) => commit_notify.notify_one(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "library head listener: recv failed; reconnecting");
-                        break;
-                    }
-                }
-            }
-        }
+        Ok(this)
     }
 
     /// Diff between two commits (None `from` = walk all of `to`'s tree as Added)
@@ -440,6 +397,7 @@ impl GitEngine {
     /// path doesn't exist (or HEAD is unborn).
     #[tracing::instrument(name = "library.git.read_blob_at_head", skip_all, fields(%path))]
     pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
+        let _ = self.local_converge(None).await; // more recon needed to confirm if this is the best placement
         let repo_path = self.repo_path.clone();
         let path = path.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, LibraryError> {
@@ -728,14 +686,123 @@ impl GitEngine {
             .map_err(|_| LibraryError::Git("git writer dropped response".into()))?
     }
 
+    // get local head
+    async fn head(repo_path: PathBuf, repo_mutex: Arc<Mutex<()>>) -> Result<Option<String>, LibraryError> {
+        let _guard = repo_mutex.lock().await;
+        let path = repo_path.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let repo = git2::Repository::open_bare(&path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+
+            Ok(repo.head().ok().and_then(|r| r.target()).map(|oid| oid.to_string()))
+        })
+        .await
+            .map_err(|e| LibraryError::Git(format!("head join: {e}")))?
+    }
+
+    // get remote head
+    // Initially intended to use a single row table
+    // Current implementation of Obix leaves me considering: What if event not processed? (My impl could be the problem here meaning potentially pointless consideration)
+    // Leave as using the git repo as absolute source of truth and not delegate to a db
+    // Trade-Off considerations:
+    //     - Db persisted value:
+    //         - Removes load of n queries to the git repo
+    //     - Git Repo source of truth:
+    //         - Guaranteed ryw accuracy (when the repo is reachable)
+    #[tracing::instrument(name = "library.git.remote_head", skip_all)]
+    pub async fn remote_head(&self) -> Result<Option<String>, LibraryError> {
+        let _guard = self.repo_mutex.lock().await;
+        let token = Self::fresh_token(self.github_app.as_ref()).await;
+        let path = self.repo_path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<Option<String>, LibraryError> {
+            let repo = git2::Repository::open_bare(&path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+
+            Self::fetch_origin(&repo, token.as_deref())?;
+
+            let head = repo
+                .find_reference("refs/remotes/origin/main")
+                .ok()
+                .and_then(|reference| reference.target())
+                .map(|oid| oid.to_string());
+
+            Ok(head)
+        })
+        .await
+            .map_err(|e| LibraryError::Git(format!("remote_head join: {e}")))?
+    }
+
+    // verifies if the commit is contained locally
+    // given the write nature
+    // I'm assuming a linear history for now
+    pub async fn contains_commit(
+        &self,
+        hash: &str,
+    ) -> Result<bool, LibraryError> {
+        let _guard = self.repo_mutex.lock().await;
+        let path = self.repo_path.clone();
+
+        let target = Oid::from_str(hash)
+            .map_err(|e| LibraryError::Git(format!("invalid commit OID: {e}")))?;
+
+        tokio::task::spawn_blocking(move || {
+            let repo = git2::Repository::open_bare(&path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+
+            let result = repo.find_commit(target);
+
+            match result {
+                Ok(_) => Ok(true),
+                Err(err) if err.code() == git2::ErrorCode::NotFound => Ok(false),
+                Err(err) => Err(LibraryError::Git(format!("check local commit: {err}"))),
+            }
+        })
+        .await
+            .map_err(|e| LibraryError::Git(format!("contains_commit join: {e}")))?
+    }
+
+    // replica converge handler
+    // testing so far indicates that there can be a race between the event consumption & reads
+    // initially I wanted to store the last consumed event's head as a source of truth for read conciliation
+    // but given the aforementioned race, I'll fallback to the git repo as the source of truth
+    // Get the local head & the remote head
+    // if local head >= remote head -> read
+    // else -> pull upstream
+    pub async fn local_converge(
+        &self,
+        hash: Option<String>,
+    ) -> Result<(), LibraryError> {
+        let target = match hash {
+            Some(hash) => hash,
+            None => loop {
+                match self.remote_head().await? {
+                    Some(head) => break head,
+                    None => {
+                        self.fetch_and_head().await?;
+                    }
+                }
+            },
+        };
+
+        loop {
+            if self.contains_commit(&target).await? {
+                return Ok(());
+            }
+
+            self.fetch_and_head().await?;
+        }
+    }
+
     /// Drains the queue forever: takes the first op, waits up to
     /// [`BATCH_WINDOW`] for siblings, then runs the whole batch as
     /// N commits + 1 push under the [`Self::repo_mutex`].
     async fn run_writer(
+        head_token: HeadToken,
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
         repo_mutex: Arc<Mutex<()>>,
-        commit_notify: Arc<Notify>,
         mut rx: mpsc::Receiver<QueuedOp>,
         pool: PgPool,
     ) {
@@ -754,12 +821,7 @@ impl GitEngine {
                     Err(_) => break,    // window elapsed
                 }
             }
-            let any_ok =
-                Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch)
-                    .await;
-            if any_ok {
-                commit_notify.notify_one();
-            }
+            Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch, head_token.clone()).await;
         }
     }
 
@@ -770,7 +832,8 @@ impl GitEngine {
         repo_mutex: &Mutex<()>,
         pool: &PgPool,
         batch: Vec<QueuedOp>,
-    ) -> bool {
+        head_token: HeadToken
+    ) {
         let _guard = repo_mutex.lock().await;
         // Cluster-wide push serialization (HA): the per-pod `repo_mutex` only
         // orders writes within a pod; this advisory lock ensures at most one
@@ -806,20 +869,32 @@ impl GitEngine {
         let (ops, responders): (Vec<BatchOp>, Vec<oneshot::Sender<Result<(), LibraryError>>>) =
             batch.into_iter().map(|q| (q.op, q.response)).unzip();
 
-        let results = tokio::task::spawn_blocking(move || -> Vec<Result<(), LibraryError>> {
+        let (results, local_head) = tokio::task::spawn_blocking(move || -> (Vec<Result<(), LibraryError>>, Option<String>) {
             Self::commit_each_then_push_blocking(&path, ops, token.as_deref())
         })
         .await
         .unwrap_or_else(|e| {
             let msg = format!("commit_each_then_push join: {e}");
-            (0..n)
-                .map(|_| Err(LibraryError::Git(msg.clone())))
-                .collect()
+                ((0..n)
+                    .map(|_| Err(LibraryError::Git(msg.clone())))
+                    .collect(),
+                None)
         });
 
         let any_ok = results.iter().any(|r| r.is_ok());
         if any_ok {
-            Self::notify_cluster_push(pool, lock_conn.as_deref_mut()).await;
+            // emit event if pushes exist
+            if let Some(new_local_head) = local_head {
+                if
+                    let Err(_err) = head_token.publish_persisted_head(new_local_head.clone()).await
+                {
+                    tracing::error!("Unable to emit the event for the recent: commit_each_then_push_blocking: {}", _err);
+                }
+                else
+                {
+                    tracing::info!("Event published. Local Head: {}", new_local_head.clone());
+                }
+            }
         }
 
         if let Some(mut conn) = lock_conn.take() {
@@ -834,30 +909,6 @@ impl GitEngine {
         for (resp, res) in responders.into_iter().zip(results) {
             let _ = resp.send(res);
         }
-        any_ok
-    }
-
-    /// Wake peer replicas' fetchers after a successful push so
-    /// cross-replica reads converge in milliseconds instead of after
-    /// each replica's fetch ticker. Best effort: failure degrades to
-    /// ticker-cadence convergence. Prefers the advisory-lock connection
-    /// (already held) over a fresh pool checkout.
-    async fn notify_cluster_push(pool: &PgPool, lock_conn: Option<&mut PgConnection>) {
-        let res = match lock_conn {
-            Some(conn) => sqlx::query("SELECT pg_notify($1, '')")
-                .bind(LIBRARY_HEAD_NOTIFY_CHANNEL)
-                .execute(conn)
-                .await
-                .map(|_| ()),
-            None => sqlx::query("SELECT pg_notify($1, '')")
-                .bind(LIBRARY_HEAD_NOTIFY_CHANNEL)
-                .execute(pool)
-                .await
-                .map(|_| ()),
-        };
-        if let Err(e) = res {
-            tracing::warn!(error = %e, "library head notify failed; peers converge on ticker");
-        }
     }
 
     /// Apply N ops as N commits, then push once. On non-FF push, fetch
@@ -867,22 +918,24 @@ impl GitEngine {
     /// op that committed locally so the caller can mark them as
     /// cascaded. Per-op `Validation` errors don't advance HEAD — the
     /// next op layers on the previous successful commit.
+    // Return the HEAD upon a successful commit
+    // Now return if there were any successful pushes + The new associated commit HEAD
     fn commit_each_then_push_blocking(
         repo_path: &Path,
         ops: Vec<BatchOp>,
         token: Option<&str>,
-    ) -> Vec<Result<(), LibraryError>> {
+    ) -> (Vec<Result<(), LibraryError>>, Option<String>) {
         if ops.is_empty() {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         let repo = match git2::Repository::open_bare(repo_path) {
             Ok(r) => r,
             Err(e) => {
                 let msg = format!("open bare: {e}");
-                return ops
+                return (ops
                     .iter()
                     .map(|_| Err(LibraryError::Git(msg.clone())))
-                    .collect();
+                    .collect(), None);
             }
         };
 
@@ -891,10 +944,10 @@ impl GitEngine {
             Ok(c) => c.id(),
             Err(e) => {
                 let msg = format!("head: {e}");
-                return ops
+                return (ops
                     .iter()
                     .map(|_| Err(LibraryError::Git(msg.clone())))
-                    .collect();
+                    .collect(), None);
             }
         };
         let mut attempt: u32 = 0;
@@ -904,10 +957,10 @@ impl GitEngine {
                 Ok(c) => c.id(),
                 Err(e) => {
                     let msg = format!("head: {e}");
-                    return ops
+                    return (ops
                         .iter()
                         .map(|_| Err(LibraryError::Git(msg.clone())))
-                        .collect();
+                        .collect(), None);
                 }
             };
             let mut current_parent_oid = parent_oid_at_attempt_start;
@@ -923,12 +976,14 @@ impl GitEngine {
                 }
             }
 
+            tracing::info!("{} | {}", parent_oid_at_attempt_start.to_string(), current_parent_oid.to_string());
+
             if current_parent_oid == parent_oid_at_attempt_start {
-                return per_op;
+                return (per_op, None);
             }
 
             match Self::push_main(&repo, token) {
-                Ok(()) => return per_op,
+                Ok(()) => return (per_op, Some(current_parent_oid.to_string())),
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::info!(
                         error = %e, attempt,
@@ -936,17 +991,17 @@ impl GitEngine {
                     );
                     if let Err(fe) = Self::fetch_origin(&repo, token) {
                         let msg = fe.to_string();
-                        return ops
+                        return (ops
                             .iter()
                             .map(|_| Err(LibraryError::Git(msg.clone())))
-                            .collect();
+                            .collect(), None);
                     }
                     if let Err(re) = Self::reset_main_to_origin(&repo) {
                         let msg = re.to_string();
-                        return ops
+                        return (ops
                             .iter()
                             .map(|_| Err(LibraryError::Git(msg.clone())))
-                            .collect();
+                            .collect(), None);
                     }
                 }
                 Err(e) => {
@@ -957,13 +1012,13 @@ impl GitEngine {
                         "rollback after push failure",
                     );
                     let msg = format!("push failed: {e}");
-                    return per_op
+                    return (per_op
                         .into_iter()
                         .map(|r| match r {
                             Ok(()) => Err(LibraryError::Git(msg.clone())),
                             Err(e) => Err(e),
                         })
-                        .collect();
+                        .collect(), None);
                 }
             }
         }
