@@ -10,7 +10,7 @@ use crate::attribution::CommitAttribution;
 use crate::importer::GitFileHash;
 use crate::{GitHubAppTokenProvider, LibraryError};
 use crate::head_token::HeadToken;
-use git2::{Oid, Repository};
+use git2::Oid;
 
 /// How long the writer waits for additional ops after the first one
 /// arrives before processing the batch. Sized to absorb the jitter of
@@ -397,7 +397,18 @@ impl GitEngine {
     /// path doesn't exist (or HEAD is unborn).
     #[tracing::instrument(name = "library.git.read_blob_at_head", skip_all, fields(%path))]
     pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
-        let _ = self.local_converge(None).await; // more recon needed to confirm if this is the best placement
+        // more recon needed to confirm if this is the best placement
+        // leaving here for now
+        let caught_up = self.local_converge(None)
+            .await
+            .map_err(|e| LibraryError::Git(format!("local converge: {e}")))?;
+
+        if
+            !caught_up
+        {
+            return Ok(None)
+        }
+
         let repo_path = self.repo_path.clone();
         let path = path.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, LibraryError> {
@@ -687,18 +698,25 @@ impl GitEngine {
     }
 
     // get local head
-    async fn head(repo_path: PathBuf, repo_mutex: Arc<Mutex<()>>) -> Result<Option<String>, LibraryError> {
-        let _guard = repo_mutex.lock().await;
+    async fn head(&self, repo_path: PathBuf) -> Result<Option<Oid>, LibraryError> {
         let path = repo_path.clone();
 
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<Option<Oid>, LibraryError> {
             let repo = git2::Repository::open_bare(&path)
                 .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
 
-            Ok(repo.head().ok().and_then(|r| r.target()).map(|oid| oid.to_string()))
+            Ok(
+                repo.head()
+                .ok()
+                .and_then(|r| r.target())
+                .map(|oid| {
+                    println!("Local Head: {}", oid);
+                    oid
+                })
+            )
         })
         .await
-            .map_err(|e| LibraryError::Git(format!("head join: {e}")))?
+            .map_err(|e| LibraryError::Git(format!("head: {e}")))?
     }
 
     // get remote head
@@ -711,7 +729,7 @@ impl GitEngine {
     //     - Git Repo source of truth:
     //         - Guaranteed ryw accuracy (when the repo is reachable)
     #[tracing::instrument(name = "library.git.remote_head", skip_all)]
-    pub async fn remote_head(&self) -> Result<Option<String>, LibraryError> {
+    async fn remote_head(&self) -> Result<Option<String>, LibraryError> {
         let _guard = self.repo_mutex.lock().await;
         let token = Self::fresh_token(self.github_app.as_ref()).await;
         let path = self.repo_path.clone();
@@ -747,52 +765,72 @@ impl GitEngine {
         let target = Oid::from_str(hash)
             .map_err(|e| LibraryError::Git(format!("invalid commit OID: {e}")))?;
 
+        let Some(head_oid) = self.head(path.clone())
+            .await?
+            else
+            {
+                tracing::error!("Failed to extract the head_oid");
+                return Ok(false);
+            };
+
         tokio::task::spawn_blocking(move || {
             let repo = git2::Repository::open_bare(&path)
                 .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
 
-            let result = repo.find_commit(target);
-
-            match result {
-                Ok(_) => Ok(true),
-                Err(err) if err.code() == git2::ErrorCode::NotFound => Ok(false),
-                Err(err) => Err(LibraryError::Git(format!("check local commit: {err}"))),
+            match repo.merge_base(head_oid, target)
+            {
+                Ok(base_oid) if base_oid == target => Ok(true),
+                _ => Ok(false)
             }
         })
         .await
-            .map_err(|e| LibraryError::Git(format!("contains_commit join: {e}")))?
+            .map_err(|e| LibraryError::Git(format!("contains commit: {e}")))?
     }
 
     // replica converge handler
     // testing so far indicates that there can be a race between the event consumption & reads
-    // initially I wanted to store the last consumed event's head as a source of truth for read conciliation
+    // initially I wanted to store the last consumed event's head as a source of truth for read reconciliation
     // but given the aforementioned race, I'll fallback to the git repo as the source of truth
     // Get the local head & the remote head
     // if local head >= remote head -> read
     // else -> pull upstream
+    // One attempt at ryw: consider the cost of retries on the git repo
+    // if can't converge, say so early
+    // given that git is the source of truth
+    // better to fail early than to keep many open, possibly n (replicas) * sequential retries gnawing at the remote repo
     pub async fn local_converge(
         &self,
         hash: Option<String>,
-    ) -> Result<(), LibraryError> {
+    ) -> Result<bool, LibraryError> {
         let target = match hash {
-            Some(hash) => hash,
-            None => loop {
+            // events pass a commit hash here
+            Some(hash) => {
+                hash
+            },
+            // request to call from read_blob_at_head for ryw guarantee
+            None => {
+                tracing::info!("Local converge: ryw guarantee requested");
                 match self.remote_head().await? {
-                    Some(head) => break head,
+                    Some(head) => head,
                     None => {
-                        self.fetch_and_head().await?;
+                        tracing::warn!("Local converge: failed to fetch the remote head");
+                        return Ok(false);
                     }
                 }
             },
         };
 
-        loop {
-            if self.contains_commit(&target).await? {
-                return Ok(());
-            }
-
-            self.fetch_and_head().await?;
+        if self.contains_commit(&target).await? {
+            return Ok(true);
         }
+
+        if let Err(err) = self.fetch_and_head().await
+        {
+            tracing::error!("Local converge, error at attempt to catch up: {err}");
+            return Ok(false);
+        };
+
+        Ok(true)
     }
 
     /// Drains the queue forever: takes the first op, waits up to

@@ -71,7 +71,7 @@ impl HeadToken {
     pub async fn publish_persisted_head(
         &self,
         head_token_hash: String,
-    ) -> anyhow::Result<()> {
+    ) -> BaseLibraryResult<()> {
         let mut op = self.outbox.begin_op().await?;
         self.outbox
             .publish_persisted_in_op(
