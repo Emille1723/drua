@@ -1011,12 +1011,6 @@ impl GitEngine {
                 }
             }
 
-            tracing::info!(
-                "{} | {}",
-                parent_oid_at_attempt_start.to_string(),
-                current_parent_oid.to_string()
-            );
-
             if current_parent_oid == parent_oid_at_attempt_start {
                 return (per_op, None);
             }
