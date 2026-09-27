@@ -77,7 +77,8 @@ async fn write_on_one_replica_is_visible_on_peer_late_start() {
     // library.write job; B has no poller and a disabled ticker, so it
     // can only converge via the `library_head_changed` PG NOTIFY.
     let repo_url = fixture.path().to_string_lossy().to_string();
-    let (writing_replica, writing_replica_jobs) = init_replica(test_name, "writing_replica", &repo_url, &pool, false).await;
+    let (writing_replica, writing_replica_jobs) =
+        init_replica(test_name, "writing_replica", &repo_url, &pool, false).await;
     // let (reading_replica, reading_replica_jobs) = init_replica(test_name, "reading_replica", &repo_url, &pool, false).await;
 
     let slug = "notify";
@@ -112,8 +113,7 @@ async fn write_on_one_replica_is_visible_on_peer_late_start() {
     let mut no_content_record: Vec<i32> = Vec::new();
     let mut read_error_record: Vec<i32> = Vec::new();
 
-    for round in base_round..round_cap
-    {
+    for round in base_round..round_cap {
         println!("\n");
         let write_content = format!("{content_base}{round}");
         let modded_content = format!("modded-{write_content}");
@@ -132,14 +132,12 @@ async fn write_on_one_replica_is_visible_on_peer_late_start() {
             .expect("write");
 
         match writing_replica.spaces().read_file(slug, doc_rel_path).await {
-            Ok(Some(content)) => {
-                match String::from_utf8(content.clone()) {
-                    Ok(content_as_string) => {
-                        println!("Modded Content: {content_as_string}");
-                    }
-                    Err(err) => {
-                        eprintln!("Failed to decode retrieved content as UTF-8: {err}");
-                    }
+            Ok(Some(content)) => match String::from_utf8(content.clone()) {
+                Ok(content_as_string) => {
+                    println!("Modded Content: {content_as_string}");
+                }
+                Err(err) => {
+                    eprintln!("Failed to decode retrieved content as UTF-8: {err}");
                 }
             },
             Ok(None) => {
@@ -163,14 +161,12 @@ async fn write_on_one_replica_is_visible_on_peer_late_start() {
             .expect("write");
 
         match writing_replica.spaces().read_file(slug, doc_rel_path).await {
-            Ok(Some(content)) => {
-                match String::from_utf8(content.clone()) {
-                    Ok(content_as_string) => {
-                        println!("Modded Content New: {content_as_string}");
-                    }
-                    Err(err) => {
-                        eprintln!("Failed to decode retrieved content as UTF-8: {err}");
-                    }
+            Ok(Some(content)) => match String::from_utf8(content.clone()) {
+                Ok(content_as_string) => {
+                    println!("Modded Content New: {content_as_string}");
+                }
+                Err(err) => {
+                    eprintln!("Failed to decode retrieved content as UTF-8: {err}");
                 }
             },
             Ok(None) => {
@@ -196,9 +192,10 @@ async fn write_on_one_replica_is_visible_on_peer_late_start() {
         // Read & comparison
         // assessment advises to  consider: space().read_file()
         // considering starting reading replica later than the events
-        let (reading_replica, reading_replica_jobs) = init_replica(test_name, "reading_replica", &repo_url, &pool, false).await;
+        let (reading_replica, reading_replica_jobs) =
+            init_replica(test_name, "reading_replica", &repo_url, &pool, false).await;
         match reading_replica.spaces().read_file(slug, doc_rel_path).await {
-        // match reading_replica.read_blob_at_head(&path).await {
+            // match reading_replica.read_blob_at_head(&path).await {
             Ok(Some(content)) => {
                 println!("Comparison Window");
 
@@ -213,7 +210,7 @@ async fn write_on_one_replica_is_visible_on_peer_late_start() {
                 }
 
                 if content == write_content.as_bytes() {
-                    rounds_passed+=1;
+                    rounds_passed += 1;
                     println!(
                         "round {round}: FRESH \
                         (read on READING_REPLICA returned what WRITING_REPLICA just wrote)"

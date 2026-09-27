@@ -36,16 +36,10 @@
 //             - A verification instead and a pull upstream only if necessary
 //             - Instead of (n replicas) * (n pulls from upstream)
 
-use obix::{
-    MailboxConfig,
-    out::Outbox
-};
-use serde::{
-    Serialize,
-    Deserialize
-};
-use sqlx::PgPool;
 use crate::LibraryError;
+use obix::{out::Outbox, MailboxConfig};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 
 // define event types
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -57,21 +51,22 @@ type BaseLibraryResult<T> = Result<T, LibraryError>;
 
 #[derive(Clone)]
 pub struct HeadToken {
-    pub outbox: Outbox<SpacesEvent>
+    pub outbox: Outbox<SpacesEvent>,
 }
 
 impl HeadToken {
     pub async fn init(pool: PgPool) -> BaseLibraryResult<Self> {
-        let outbox = Outbox::<SpacesEvent>::init(&pool, MailboxConfig::builder().build().expect("Couldn't build MailboxConfig")).await?;
-        Ok(Self {
-            outbox
-        })
+        let outbox = Outbox::<SpacesEvent>::init(
+            &pool,
+            MailboxConfig::builder()
+                .build()
+                .expect("Couldn't build MailboxConfig"),
+        )
+        .await?;
+        Ok(Self { outbox })
     }
 
-    pub async fn publish_persisted_head(
-        &self,
-        head_token_hash: String,
-    ) -> anyhow::Result<()> {
+    pub async fn publish_persisted_head(&self, head_token_hash: String) -> BaseLibraryResult<()> {
         let mut op = self.outbox.begin_op().await?;
         self.outbox
             .publish_persisted_in_op(

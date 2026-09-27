@@ -2,13 +2,13 @@ pub mod attribution;
 mod config;
 mod error;
 mod git;
+mod head_token;
 mod importer;
 mod job;
 pub mod primitives;
 mod search;
 pub mod space;
 mod synced;
-mod head_token;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
+pub use crate::head_token::{HeadToken, SpacesEvent};
 pub use attribution::{CommitAttribution, CommitSubjectKind};
 pub use config::LibraryConfig;
 pub use error::LibraryError;
@@ -27,7 +28,6 @@ pub use primitives::SpaceId;
 pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE};
 pub use synced::LibrarySynced;
-pub use crate::head_token::{HeadToken, SpacesEvent};
 
 pub use self::git::DirEntry;
 use self::git::GitEngine;
@@ -72,7 +72,7 @@ impl Library {
                 repo_path,
                 github_app.clone(),
                 pool.clone(),
-                head_token.clone()
+                head_token.clone(),
             )
             .await?,
         );
@@ -85,6 +85,7 @@ impl Library {
         // Local Converge with event replays
         //      - convergence mechanism for events pulls upstream on a comparison where local_head < replay_event_head
         //      - all subsequent replays then can also be cheap local validation mechanism
+        // I still prefer pulling upstream on replica start/restart
         // git repo is source of truth
         // consider events as convergence/reconciliation trigger
         match git.fetch_and_head().await {
@@ -171,7 +172,7 @@ impl Library {
         git: Arc<GitEngine>,
         tick_tx: mpsc::Sender<CommitTick>,
         interval: Duration,
-        head_token: HeadToken
+        head_token: HeadToken,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
@@ -186,15 +187,28 @@ impl Library {
                             Ok(evt) => {
                                 if let Some(SpacesEvent::HeadChanged { new_head }) = &evt.payload {
                                     tracing::info!("Event emitted: Head Changed - {}", new_head);
-                                    let _ = git.local_converge(Some(new_head.clone())).await;
+                                    match git.local_converge(Some(new_head.clone())) .await
+                                    {
+                                        Ok(true) => (),
+                                        Ok(false) => tracing::warn!("Converge incomplete at: {new_head}"),
+                                        Err(err) => {
+                                            tracing::warn!(
+                                                error = %err,
+                                                "Error in converge attempt from event trigger, with hash: {new_head}"
+                                            );
+                                        }
+                                    }
                                 }
                                 else
                                 {
                                     tracing::warn!("No Head received");
                                 }
                             },
-                            Err(_err) => {
-                                dbg!(_err);
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "Error in event consumption"
+                                );
                             }
                         }
                     }
