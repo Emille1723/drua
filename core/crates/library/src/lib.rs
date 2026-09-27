@@ -194,7 +194,7 @@ impl Library {
                                         Err(err) => {
                                             tracing::warn!(
                                                 error = %err,
-                                                "Error in event consumption"
+                                                "Error in converge attempt from event trigger, with hash: {new_head}"
                                             );
                                         }
                                     }

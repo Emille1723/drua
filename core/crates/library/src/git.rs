@@ -778,8 +778,9 @@ impl GitEngine {
 
             match repo.merge_base(head_oid, target)
             {
-                Ok(base_oid) if base_oid == target => Ok(true),
-                _ => Ok(false)
+                Ok(base_oid) => Ok(base_oid == target),
+                Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(false),
+                Err(e) => Err(LibraryError::Git(format!("merge base: {e}"))),
             }
         })
         .await
