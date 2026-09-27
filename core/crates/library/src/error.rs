@@ -13,5 +13,7 @@ pub enum LibraryError {
     #[error("sqlx: {0}")]
     Sqlx(#[from] sqlx::Error),
     #[error("space event: {0}")]
-    SpacesEvent(String)
+    SpacesEvent(String),
+    #[error("converge event: {0}")]
+    NotConverged(String)
 }

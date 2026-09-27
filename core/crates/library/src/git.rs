@@ -399,14 +399,14 @@ impl GitEngine {
     pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
         // more recon needed to confirm if this is the best placement
         // leaving here for now
-        let caught_up = self.local_converge(None)
-            .await
-            .map_err(|e| LibraryError::Git(format!("local converge: {e}")))?;
-
-        if
-            !caught_up
+        if !self.local_converge(None)
+            .await?
         {
-            return Ok(None)
+            // Not sure how the failure to guarantee should be disclosed from here
+            // Not sure if None: returns file not found and mechanism is around that (possible file re-creation fallback?)
+            // return Ok(None);
+            // Sticking to returning an error
+            return Err(LibraryError::NotConverged("could not confirm local main is up to date with upstream".into()));
         }
 
         let repo_path = self.repo_path.clone();
@@ -710,7 +710,6 @@ impl GitEngine {
                 .ok()
                 .and_then(|r| r.target())
                 .map(|oid| {
-                    println!("Local Head: {}", oid);
                     oid
                 })
             )

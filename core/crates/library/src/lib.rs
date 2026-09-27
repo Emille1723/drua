@@ -187,9 +187,17 @@ impl Library {
                             Ok(evt) => {
                                 if let Some(SpacesEvent::HeadChanged { new_head }) = &evt.payload {
                                     tracing::info!("Event emitted: Head Changed - {}", new_head);
-                                    let _ = git.local_converge(Some(new_head.clone()))
-                                        .await
-                                        .map_err(|e| LibraryError::SpacesEvent(format!("SpacesEvent converge attempt: {e}")));
+                                    match git.local_converge(Some(new_head.clone())) .await
+                                    {
+                                        Ok(true) => (),
+                                        Ok(false) => tracing::warn!("Converge incomplete at: {new_head}"),
+                                        Err(err) => {
+                                            tracing::warn!(
+                                                error = %err,
+                                                "Error in event consumption"
+                                            );
+                                        }
+                                    }
                                 }
                                 else
                                 {
