@@ -7,9 +7,9 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::attribution::CommitAttribution;
+use crate::head_token::HeadToken;
 use crate::importer::GitFileHash;
 use crate::{GitHubAppTokenProvider, LibraryError};
-use crate::head_token::HeadToken;
 use git2::Oid;
 
 /// How long the writer waits for additional ops after the first one
@@ -145,7 +145,7 @@ impl GitEngine {
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
         pool: PgPool,
-        head_token: HeadToken
+        head_token: HeadToken,
     ) -> Result<Self, LibraryError> {
         if repo_url.is_empty() {
             return Err(LibraryError::Config("repo_url is empty".into()));
@@ -177,7 +177,7 @@ impl GitEngine {
             write_tx,
             github_app,
             _writer: OwnedTaskHandle::new(writer),
-            head_token
+            head_token,
         };
 
         Ok(this)
@@ -399,14 +399,14 @@ impl GitEngine {
     pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
         // more recon needed to confirm if this is the best placement
         // leaving here for now
-        if !self.local_converge(None)
-            .await?
-        {
+        if !self.local_converge(None).await? {
             // Not sure how the failure to guarantee should be disclosed from here
             // Not sure if None: returns file not found and mechanism is around that (possible file re-creation fallback?)
             // return Ok(None);
             // Sticking to returning an error
-            return Err(LibraryError::NotConverged("could not confirm local main is up to date with upstream".into()));
+            return Err(LibraryError::NotConverged(
+                "could not confirm local main is up to date with upstream".into(),
+            ));
         }
 
         let repo_path = self.repo_path.clone();
@@ -705,17 +705,10 @@ impl GitEngine {
             let repo = git2::Repository::open_bare(&path)
                 .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
 
-            Ok(
-                repo.head()
-                .ok()
-                .and_then(|r| r.target())
-                .map(|oid| {
-                    oid
-                })
-            )
+            Ok(repo.head().ok().and_then(|r| r.target()).map(|oid| oid))
         })
         .await
-            .map_err(|e| LibraryError::Git(format!("head: {e}")))?
+        .map_err(|e| LibraryError::Git(format!("head: {e}")))?
     }
 
     // get remote head
@@ -748,43 +741,36 @@ impl GitEngine {
             Ok(head)
         })
         .await
-            .map_err(|e| LibraryError::Git(format!("remote_head join: {e}")))?
+        .map_err(|e| LibraryError::Git(format!("remote_head join: {e}")))?
     }
 
     // verifies if the commit is contained locally
     // given the write nature
     // I'm assuming a linear history for now
-    pub async fn contains_commit(
-        &self,
-        hash: &str,
-    ) -> Result<bool, LibraryError> {
+    pub async fn contains_commit(&self, hash: &str) -> Result<bool, LibraryError> {
         let _guard = self.repo_mutex.lock().await;
         let path = self.repo_path.clone();
 
         let target = Oid::from_str(hash)
             .map_err(|e| LibraryError::Git(format!("invalid commit OID: {e}")))?;
 
-        let Some(head_oid) = self.head(path.clone())
-            .await?
-            else
-            {
-                tracing::error!("Failed to extract the head_oid");
-                return Ok(false);
-            };
+        let Some(head_oid) = self.head(path.clone()).await? else {
+            tracing::error!("Failed to extract the head_oid");
+            return Ok(false);
+        };
 
         tokio::task::spawn_blocking(move || {
             let repo = git2::Repository::open_bare(&path)
                 .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
 
-            match repo.merge_base(head_oid, target)
-            {
+            match repo.merge_base(head_oid, target) {
                 Ok(base_oid) => Ok(base_oid == target),
                 Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(false),
                 Err(e) => Err(LibraryError::Git(format!("merge base: {e}"))),
             }
         })
         .await
-            .map_err(|e| LibraryError::Git(format!("contains commit: {e}")))?
+        .map_err(|e| LibraryError::Git(format!("contains commit: {e}")))?
     }
 
     // replica converge handler
@@ -798,15 +784,10 @@ impl GitEngine {
     // if can't converge, say so early
     // given that git is the source of truth
     // better to fail early than to keep many open, possibly n (replicas) * sequential retries gnawing at the remote repo
-    pub async fn local_converge(
-        &self,
-        hash: Option<String>,
-    ) -> Result<bool, LibraryError> {
+    pub async fn local_converge(&self, hash: Option<String>) -> Result<bool, LibraryError> {
         let target = match hash {
             // events pass a commit hash here
-            Some(hash) => {
-                hash
-            },
+            Some(hash) => hash,
             // request to call from read_blob_at_head for ryw guarantee
             None => {
                 tracing::info!("Local converge: ryw guarantee requested");
@@ -817,20 +798,19 @@ impl GitEngine {
                         return Ok(false);
                     }
                 }
-            },
+            }
         };
 
         if self.contains_commit(&target).await? {
             return Ok(true);
         }
 
-        if let Err(err) = self.fetch_and_head().await
-        {
+        if let Err(err) = self.fetch_and_head().await {
             tracing::error!("Local converge, error at attempt to catch up: {err}");
             return Ok(false);
         };
 
-        Ok(true)
+        self.contains_commit(&target).await
     }
 
     /// Drains the queue forever: takes the first op, waits up to
@@ -859,7 +839,15 @@ impl GitEngine {
                     Err(_) => break,    // window elapsed
                 }
             }
-            Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch, head_token.clone()).await;
+            Self::process_batch(
+                &repo_path,
+                github_app.as_ref(),
+                &repo_mutex,
+                &pool,
+                batch,
+                head_token.clone(),
+            )
+            .await;
         }
     }
 
@@ -870,7 +858,7 @@ impl GitEngine {
         repo_mutex: &Mutex<()>,
         pool: &PgPool,
         batch: Vec<QueuedOp>,
-        head_token: HeadToken
+        head_token: HeadToken,
     ) {
         let _guard = repo_mutex.lock().await;
         // Cluster-wide push serialization (HA): the per-pod `repo_mutex` only
@@ -907,29 +895,32 @@ impl GitEngine {
         let (ops, responders): (Vec<BatchOp>, Vec<oneshot::Sender<Result<(), LibraryError>>>) =
             batch.into_iter().map(|q| (q.op, q.response)).unzip();
 
-        let (results, local_head) = tokio::task::spawn_blocking(move || -> (Vec<Result<(), LibraryError>>, Option<String>) {
-            Self::commit_each_then_push_blocking(&path, ops, token.as_deref())
-        })
+        let (results, local_head) = tokio::task::spawn_blocking(
+            move || -> (Vec<Result<(), LibraryError>>, Option<String>) {
+                Self::commit_each_then_push_blocking(&path, ops, token.as_deref())
+            },
+        )
         .await
         .unwrap_or_else(|e| {
             let msg = format!("commit_each_then_push join: {e}");
-                ((0..n)
+            (
+                (0..n)
                     .map(|_| Err(LibraryError::Git(msg.clone())))
                     .collect(),
-                None)
+                None,
+            )
         });
 
         let any_ok = results.iter().any(|r| r.is_ok());
         if any_ok {
             // emit event if pushes exist
             if let Some(new_local_head) = local_head {
-                if
-                    let Err(_err) = head_token.publish_persisted_head(new_local_head.clone()).await
+                if let Err(_err) = head_token
+                    .publish_persisted_head(new_local_head.clone())
+                    .await
                 {
                     tracing::error!("Unable to emit the event for the recent: commit_each_then_push_blocking: {}", _err);
-                }
-                else
-                {
+                } else {
                     tracing::info!("Event published. Local Head: {}", new_local_head.clone());
                 }
             }
@@ -970,10 +961,12 @@ impl GitEngine {
             Ok(r) => r,
             Err(e) => {
                 let msg = format!("open bare: {e}");
-                return (ops
-                    .iter()
-                    .map(|_| Err(LibraryError::Git(msg.clone())))
-                    .collect(), None);
+                return (
+                    ops.iter()
+                        .map(|_| Err(LibraryError::Git(msg.clone())))
+                        .collect(),
+                    None,
+                );
             }
         };
 
@@ -982,10 +975,12 @@ impl GitEngine {
             Ok(c) => c.id(),
             Err(e) => {
                 let msg = format!("head: {e}");
-                return (ops
-                    .iter()
-                    .map(|_| Err(LibraryError::Git(msg.clone())))
-                    .collect(), None);
+                return (
+                    ops.iter()
+                        .map(|_| Err(LibraryError::Git(msg.clone())))
+                        .collect(),
+                    None,
+                );
             }
         };
         let mut attempt: u32 = 0;
@@ -995,10 +990,12 @@ impl GitEngine {
                 Ok(c) => c.id(),
                 Err(e) => {
                     let msg = format!("head: {e}");
-                    return (ops
-                        .iter()
-                        .map(|_| Err(LibraryError::Git(msg.clone())))
-                        .collect(), None);
+                    return (
+                        ops.iter()
+                            .map(|_| Err(LibraryError::Git(msg.clone())))
+                            .collect(),
+                        None,
+                    );
                 }
             };
             let mut current_parent_oid = parent_oid_at_attempt_start;
@@ -1014,7 +1011,11 @@ impl GitEngine {
                 }
             }
 
-            tracing::info!("{} | {}", parent_oid_at_attempt_start.to_string(), current_parent_oid.to_string());
+            tracing::info!(
+                "{} | {}",
+                parent_oid_at_attempt_start.to_string(),
+                current_parent_oid.to_string()
+            );
 
             if current_parent_oid == parent_oid_at_attempt_start {
                 return (per_op, None);
@@ -1029,17 +1030,21 @@ impl GitEngine {
                     );
                     if let Err(fe) = Self::fetch_origin(&repo, token) {
                         let msg = fe.to_string();
-                        return (ops
-                            .iter()
-                            .map(|_| Err(LibraryError::Git(msg.clone())))
-                            .collect(), None);
+                        return (
+                            ops.iter()
+                                .map(|_| Err(LibraryError::Git(msg.clone())))
+                                .collect(),
+                            None,
+                        );
                     }
                     if let Err(re) = Self::reset_main_to_origin(&repo) {
                         let msg = re.to_string();
-                        return (ops
-                            .iter()
-                            .map(|_| Err(LibraryError::Git(msg.clone())))
-                            .collect(), None);
+                        return (
+                            ops.iter()
+                                .map(|_| Err(LibraryError::Git(msg.clone())))
+                                .collect(),
+                            None,
+                        );
                     }
                 }
                 Err(e) => {
@@ -1050,13 +1055,16 @@ impl GitEngine {
                         "rollback after push failure",
                     );
                     let msg = format!("push failed: {e}");
-                    return (per_op
-                        .into_iter()
-                        .map(|r| match r {
-                            Ok(()) => Err(LibraryError::Git(msg.clone())),
-                            Err(e) => Err(e),
-                        })
-                        .collect(), None);
+                    return (
+                        per_op
+                            .into_iter()
+                            .map(|r| match r {
+                                Ok(()) => Err(LibraryError::Git(msg.clone())),
+                                Err(e) => Err(e),
+                            })
+                            .collect(),
+                        None,
+                    );
                 }
             }
         }

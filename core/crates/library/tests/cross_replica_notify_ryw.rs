@@ -74,8 +74,10 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     // library.write job; B has no poller and a disabled ticker, so it
     // can only converge via the `library_head_changed` PG NOTIFY.
     let repo_url = fixture.path().to_string_lossy().to_string();
-    let (writing_replica, writing_replica_jobs) = init_replica(test_name, "writing_replica", &repo_url, &pool, false).await;
-    let (reading_replica, reading_replica_jobs) = init_replica(test_name, "reading_replica", &repo_url, &pool, false).await;
+    let (writing_replica, writing_replica_jobs) =
+        init_replica(test_name, "writing_replica", &repo_url, &pool, false).await;
+    let (reading_replica, reading_replica_jobs) =
+        init_replica(test_name, "reading_replica", &repo_url, &pool, false).await;
 
     let slug = "notify";
     let path = format!("spaces/{slug}/doc.md");
@@ -109,8 +111,7 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     let mut no_content_record: Vec<i32> = Vec::new();
     let mut read_error_record: Vec<i32> = Vec::new();
 
-    for round in base_round..round_cap
-    {
+    for round in base_round..round_cap {
         println!("\n");
         let write_content = format!("{content_base}{round}");
 
@@ -129,7 +130,7 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
         // Read & comparison
         // assessment advises to  consider: space().read_file()
         match reading_replica.spaces().read_file(slug, doc_rel_path).await {
-        // match reading_replica.read_blob_at_head(&path).await {
+            // match reading_replica.read_blob_at_head(&path).await {
             Ok(Some(content)) => {
                 println!("Comparison Window");
 
@@ -144,7 +145,7 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
                 }
 
                 if content == write_content.as_bytes() {
-                    rounds_passed+=1;
+                    rounds_passed += 1;
                     println!(
                         "round {round}: FRESH \
                         (read on READING_REPLICA returned what WRITING_REPLICA just wrote)"

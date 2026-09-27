@@ -15,5 +15,5 @@ pub enum LibraryError {
     #[error("space event: {0}")]
     SpacesEvent(String),
     #[error("converge event: {0}")]
-    NotConverged(String)
+    NotConverged(String),
 }
